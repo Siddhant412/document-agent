@@ -1,0 +1,69 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: document_agent
+      POSTGRES_PASSWORD: document_agent
+      POSTGRES_DB: document_agent
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U document_agent -d document_agent"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: minioadmin
+      MINIO_ROOT_PASSWORD: minioadmin
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  api:
+    build: .
+    command: ["document-agent", "serve"]
+    env_file: .env.example
+    environment:
+      DATABASE_URL: postgresql://document_agent:document_agent@postgres:5432/document_agent
+      MINIO_ENDPOINT: minio:9000
+      PUBLIC_BASE_URL: http://localhost:8080
+      API_BASE_URL: http://localhost:8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  worker:
+    build: .
+    command: ["document-agent", "worker"]
+    env_file: .env.example
+    environment:
+      DATABASE_URL: postgresql://document_agent:document_agent@postgres:5432/document_agent
+      MINIO_ENDPOINT: minio:9000
+      PUBLIC_BASE_URL: http://localhost:8080
+      API_BASE_URL: http://api:8080
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+volumes:
+  postgres-data:
+  minio-data:
