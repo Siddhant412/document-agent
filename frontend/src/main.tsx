@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
+  Activity,
   AlertCircle,
   CheckCircle2,
   Copy,
@@ -34,6 +35,7 @@ import {
   uploadFiles
 } from "./api";
 import "./styles.css";
+import { ObservabilityApp } from "./ObservabilityApp";
 
 type PreviewState =
   | { kind: "idle" }
@@ -383,6 +385,14 @@ function App() {
               <Play size={16} />
               <span>Reprocess</span>
             </button>
+            <button
+              className="tool-button"
+              onClick={() => window.open("/app/observability", "_blank")}
+              title="Open Observability"
+            >
+              <Activity size={16} />
+              <span>Observability</span>
+            </button>
             <button className="icon-button danger" disabled={!selected} onClick={handleDelete} title="Delete">
               <Trash2 size={17} />
             </button>
@@ -627,8 +637,10 @@ function messageFromError(error: unknown) {
   return "Request failed.";
 }
 
+const isObsPage = window.location.pathname.startsWith("/app/observability");
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
-    <App />
+    {isObsPage ? <ObservabilityApp /> : <App />}
   </React.StrictMode>
 );

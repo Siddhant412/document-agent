@@ -22,6 +22,22 @@ Outputs:
 - Markdown links extracted assets through HTTP URLs like `http://localhost:8080/v1/assets/{asset_id}`.
 - Source image inputs are OCRed into Markdown and retained only as private original library files, not embedded back into Markdown.
 
+<p align="center">
+  <br>
+  <img src="assets/ui_home.png" alt="Home UI Screenshot" width="700">
+  <br>
+  <em>Document Library UI</em>
+</p>
+
+<br>
+
+<p align="center">
+  <img src="assets/ui_obs.png" alt="Observability UI Screenshot" width="700">
+  <br>
+  <em>Observability UI</em>
+  <br>
+</p>
+
 Runtime services:
 
 - `api`: FastAPI upload/library/status/SSE/result API and web UI on `http://localhost:8080`.
@@ -101,6 +117,7 @@ Expected response:
 Useful service URLs:
 
 - File library UI: `http://localhost:8080/app`
+- Observability UI: `http://localhost:8080/app/observability`
 - API health: `http://localhost:8080/healthz`
 - API readiness: `http://localhost:8080/readyz`
 - API docs: `http://localhost:8080/docs`
@@ -126,6 +143,53 @@ http://localhost:8080/app
 The UI supports single and multi-file upload, background queue status, a file library list, original/converted previews, Markdown preview/raw views, Markdown download, delete, and reprocess from the retained original file.
 
 If `API_KEY` is set, open the settings button in the UI and enter the same key. Static UI files remain public, but API calls still require the configured key.
+
+## Observability UI
+
+Open in a new tab from the library UI (click the **Observability** button in the toolbar), or go directly to:
+
+```text
+http://localhost:8080/app/observability
+```
+
+The page has four tabs:
+
+**Overview** — high-level system snapshot:
+- Stat cards: total jobs, success rate, active jobs, failed jobs, average conversion duration.
+- Bar chart: stacked succeeded/failed job counts per hour over the last 24 hours.
+- Donut chart: job distribution by detected file type.
+- Health badges: API, Database, and Worker status.
+
+**Events** — global feed from the `job_events` table:
+- Filter by event type (`queued`, `started`, `progress`, `succeeded`, `failed`, `asset_uploaded`) and free-text search on message content.
+- Newest events first. Click **Load older events** for cursor-based pagination.
+- When auto-refresh is on, new events are prepended with a highlighted banner.
+
+**Logs** — in-process API log ring buffer (last 2000 records):
+- Filter by log level and free-text search.
+- Dark monospace viewer with auto-tail when scrolled to the bottom.
+- Polls only new records (`since_seq`) on each refresh cycle so the viewer appends incrementally.
+- These are API process logs only. Worker logs are in a separate process; use `docker compose logs -f worker` or the Events tab (which shows what the worker did for each job) to trace worker activity.
+
+**Metrics** — charts derived from the same data as Overview:
+- Area chart: throughput trend over the last 24 hours.
+- Donut chart: current job status breakdown.
+- Bar chart: error rate (%) per hour.
+- Horizontal bar chart: top error codes by frequency.
+- Duration stats panel: average and p95 conversion time, total batches, active leases.
+
+**Auto-refresh** cycles through Off / 5 s / 15 s / 30 s. Click the button in the top-right corner to change the interval.
+
+The observability endpoints are backed by four REST routes:
+
+```text
+GET /v1/observability/stats
+GET /v1/observability/events
+GET /v1/observability/errors
+GET /v1/observability/logs
+```
+
+All four are accessible without auth when `API_KEY` is not configured, consistent with the rest of the API.
 
 ## Convert One File
 

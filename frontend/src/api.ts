@@ -191,6 +191,114 @@ function xhrJson<T>(
   });
 }
 
+// ---------------------------------------------------------------------------
+// Observability
+// ---------------------------------------------------------------------------
+
+export interface ObsStatsResponse {
+  total_jobs: number;
+  jobs_by_status: Record<string, number>;
+  success_rate_pct: number | null;
+  avg_duration_seconds: number | null;
+  p95_duration_seconds: number | null;
+  total_batches: number;
+  active_jobs: number;
+  throughput_by_hour: Array<{ hour: string; succeeded: number; failed: number }>;
+  jobs_by_type: Array<{ detected_type: string | null; count: number }>;
+  health: Record<string, string>;
+}
+
+export interface ObsEventRow {
+  id: number;
+  library_item_id: string | null;
+  batch_id: string | null;
+  job_id: string | null;
+  event_type: string;
+  stage: string | null;
+  percent: number | null;
+  message: string | null;
+  payload: Record<string, unknown>;
+  created_at: string;
+}
+
+export interface ObsEventsResponse {
+  events: ObsEventRow[];
+  has_more: boolean;
+  next_before_id: number | null;
+}
+
+export interface ObsErrorItem {
+  job_id: string;
+  library_item_id: string | null;
+  filename: string;
+  detected_type: string | null;
+  error_code: string;
+  error_message: string | null;
+  failed_at: string | null;
+  attempt_count: number;
+}
+
+export interface ObsErrorsResponse {
+  errors: ObsErrorItem[];
+  error_code_counts: Array<{ error_code: string; count: number }>;
+  total_failed: number;
+}
+
+export interface ObsLogRecord {
+  seq: number;
+  ts: string;
+  level: string;
+  logger: string;
+  message: string;
+}
+
+export interface ObsLogsResponse {
+  logs: ObsLogRecord[];
+  max_seq: number;
+  buffer_capacity: number;
+  buffer_used: number;
+}
+
+export async function fetchObsStats(options: ApiOptions): Promise<ObsStatsResponse> {
+  return apiJson<ObsStatsResponse>("/v1/observability/stats", { method: "GET" }, options);
+}
+
+export async function fetchObsEvents(
+  params: { limit?: number; before_id?: number; since_id?: number; event_type?: string; q?: string },
+  options: ApiOptions
+): Promise<ObsEventsResponse> {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.before_id != null) query.set("before_id", String(params.before_id));
+  if (params.since_id != null) query.set("since_id", String(params.since_id));
+  if (params.event_type) query.set("event_type", params.event_type);
+  if (params.q) query.set("q", params.q);
+  return apiJson<ObsEventsResponse>(`/v1/observability/events?${query}`, { method: "GET" }, options);
+}
+
+export async function fetchObsErrors(
+  params: { limit?: number; error_code?: string; q?: string },
+  options: ApiOptions
+): Promise<ObsErrorsResponse> {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.error_code) query.set("error_code", params.error_code);
+  if (params.q) query.set("q", params.q);
+  return apiJson<ObsErrorsResponse>(`/v1/observability/errors?${query}`, { method: "GET" }, options);
+}
+
+export async function fetchObsLogs(
+  params: { limit?: number; level?: string; q?: string; since_seq?: number },
+  options: ApiOptions
+): Promise<ObsLogsResponse> {
+  const query = new URLSearchParams();
+  if (params.limit != null) query.set("limit", String(params.limit));
+  if (params.level) query.set("level", params.level);
+  if (params.q) query.set("q", params.q);
+  if (params.since_seq != null) query.set("since_seq", String(params.since_seq));
+  return apiJson<ObsLogsResponse>(`/v1/observability/logs?${query}`, { method: "GET" }, options);
+}
+
 async function errorFromResponse(response: Response): Promise<ApiError> {
   const text = await response.text();
   return new ApiError(response.status, responseDetail(text));

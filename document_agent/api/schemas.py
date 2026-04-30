@@ -163,3 +163,76 @@ class DeleteLibraryItemResponse(BaseModel):
     library_item_id: UUID
     deleted: bool
     deleted_assets: int
+
+
+# ---------------------------------------------------------------------------
+# Observability schemas
+# ---------------------------------------------------------------------------
+
+class ObservabilityStatsResponse(BaseModel):
+    total_jobs: int
+    jobs_by_status: Dict[str, int]
+    success_rate_pct: Optional[float] = None
+    avg_duration_seconds: Optional[float] = None
+    p95_duration_seconds: Optional[float] = None
+    total_batches: int
+    active_jobs: int
+    throughput_by_hour: List[Dict[str, Any]]
+    jobs_by_type: List[Dict[str, Any]]
+    health: Dict[str, str]
+
+
+class ObsEventRow(BaseModel):
+    id: int
+    library_item_id: Optional[UUID] = None
+    batch_id: Optional[UUID] = None
+    job_id: Optional[UUID] = None
+    event_type: str
+    stage: Optional[str] = None
+    percent: Optional[int] = None
+    message: Optional[str] = None
+    payload: Dict[str, Any] = Field(default_factory=dict)
+    created_at: datetime
+
+
+class ObservabilityEventsResponse(BaseModel):
+    events: List[ObsEventRow]
+    has_more: bool
+    next_before_id: Optional[int] = None
+
+
+class ObsErrorItem(BaseModel):
+    job_id: UUID
+    library_item_id: Optional[UUID] = None
+    filename: str
+    detected_type: Optional[str] = None
+    error_code: str
+    error_message: Optional[str] = None
+    failed_at: Optional[datetime] = None
+    attempt_count: int
+
+
+class ObsErrorCodeCount(BaseModel):
+    error_code: str
+    count: int
+
+
+class ObservabilityErrorsResponse(BaseModel):
+    errors: List[ObsErrorItem]
+    error_code_counts: List[ObsErrorCodeCount]
+    total_failed: int
+
+
+class ObsLogRecord(BaseModel):
+    seq: int
+    ts: str
+    level: str
+    logger: str
+    message: str
+
+
+class ObservabilityLogsResponse(BaseModel):
+    logs: List[ObsLogRecord]
+    max_seq: int
+    buffer_capacity: int
+    buffer_used: int

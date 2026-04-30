@@ -1384,6 +1384,146 @@ class Repository:
             )
             conn.commit()
 
+    # ------------------------------------------------------------------
+    # Observability queries
+    # ------------------------------------------------------------------
+
+    def get_observability_stats(self) -> Dict[str, Any]:
+        with self.pool.connection() as conn:
+            status_rows = conn.execute(
+                "SELECT status, COUNT(*) AS count FROM document_jobs GROUP BY status"
+            ).fetchall()
+            duration_row = conn.execute(
+                """
+                SELECT
+                  AVG(EXTRACT(EPOCH FROM (finished_at - started_at))) AS avg_seconds,
+                  PERCENTILE_CONT(0.95) WITHIN GROUP (
+                    ORDER BY EXTRACT(EPOCH FROM (finished_at - started_at))
+                  ) AS p95_seconds
+                FROM document_jobs
+                WHERE status = 'succeeded'
+                  AND started_at IS NOT NULL
+                  AND finished_at IS NOT NULL
+                """
+            ).fetchone()
+            throughput_rows = conn.execute(
+                """
+                SELECT date_trunc('hour', finished_at) AS hour, status, COUNT(*) AS count
+                FROM document_jobs
+                WHERE status IN ('succeeded', 'failed')
+                  AND finished_at >= now() - interval '24 hours'
+                GROUP BY 1, 2 ORDER BY 1 ASC
+                """
+            ).fetchall()
+            type_rows = conn.execute(
+                "SELECT detected_type, COUNT(*) AS count FROM document_jobs GROUP BY 1 ORDER BY 2 DESC"
+            ).fetchall()
+            batch_row = conn.execute("SELECT COUNT(*) AS total FROM document_batches").fetchone()
+            lease_row = conn.execute(
+                "SELECT COUNT(*) AS active FROM document_jobs WHERE status = 'running' AND lease_expires_at > now()"
+            ).fetchone()
+        return {
+            "status_counts": [dict(r) for r in status_rows],
+            "duration": dict(duration_row) if duration_row else {},
+            "throughput_by_hour": [dict(r) for r in throughput_rows],
+            "jobs_by_type": [dict(r) for r in type_rows],
+            "total_batches": int(batch_row["total"]) if batch_row else 0,
+            "active_leases": int(lease_row["active"]) if lease_row else 0,
+        }
+
+    def get_global_events(
+        self,
+        *,
+        limit: int = 50,
+        before_id: Optional[int] = None,
+        since_id: Optional[int] = None,
+        event_type: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        if since_id is not None:
+            clauses: List[str] = ["id > %s"]
+            params: List[Any] = [int(since_id)]
+            if event_type:
+                clauses.append("event_type = %s")
+                params.append(event_type)
+            if q:
+                clauses.append("message ILIKE %s")
+                params.append(f"%{q}%")
+            params.append(int(limit))
+            with self.pool.connection() as conn:
+                rows = conn.execute(
+                    f"SELECT * FROM job_events WHERE {' AND '.join(clauses)} ORDER BY id ASC LIMIT %s",
+                    tuple(params),
+                ).fetchall()
+            return [dict(r) for r in rows]
+
+        clauses = []
+        params = []
+        if before_id is not None:
+            clauses.append("id < %s")
+            params.append(int(before_id))
+        if event_type:
+            clauses.append("event_type = %s")
+            params.append(event_type)
+        if q:
+            clauses.append("message ILIKE %s")
+            params.append(f"%{q}%")
+        where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+        params.append(int(limit) + 1)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"SELECT * FROM job_events {where} ORDER BY id DESC LIMIT %s",
+                tuple(params),
+            ).fetchall()
+        return [dict(r) for r in rows]
+
+    def get_recent_errors(
+        self,
+        *,
+        limit: int = 20,
+        error_code: Optional[str] = None,
+        q: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        clauses = ["status IN ('failed', 'cancelled')", "error_code IS NOT NULL"]
+        params: List[Any] = []
+        if error_code:
+            clauses.append("error_code = %s")
+            params.append(error_code)
+        if q:
+            clauses.append("error_message ILIKE %s")
+            params.append(f"%{q}%")
+        where = " AND ".join(clauses)
+        params.append(int(limit))
+        with self.pool.connection() as conn:
+            error_rows = conn.execute(
+                f"""
+                SELECT id AS job_id, library_item_id, filename, detected_type,
+                       error_code, error_message,
+                       COALESCE(finished_at, cancelled_at) AS failed_at, attempt_count
+                FROM document_jobs
+                WHERE {where}
+                ORDER BY failed_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                tuple(params),
+            ).fetchall()
+            dist_rows = conn.execute(
+                """
+                SELECT error_code, COUNT(*) AS count
+                FROM document_jobs
+                WHERE status IN ('failed', 'cancelled') AND error_code IS NOT NULL
+                GROUP BY 1 ORDER BY 2 DESC
+                """
+            ).fetchall()
+            total_row = conn.execute(
+                "SELECT COUNT(*) AS n FROM document_jobs WHERE status IN ('failed', 'cancelled')"
+            ).fetchone()
+        return {
+            "errors": [dict(r) for r in error_rows],
+            "error_code_counts": [dict(r) for r in dist_rows],
+            "total_failed": int(total_row["n"]) if total_row else 0,
+        }
+
     def forget_assets(self, asset_ids: List[UUID]) -> int:
         if not asset_ids:
             return 0

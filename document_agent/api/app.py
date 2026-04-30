@@ -6,9 +6,9 @@ from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
-from fastapi.staticfiles import StaticFiles
-from starlette.responses import JSONResponse, Response
+from starlette.responses import FileResponse, JSONResponse, Response
 
+from document_agent.api.observability import observability_router
 from document_agent.api.routes import router
 from document_agent.config import Settings, get_settings
 from document_agent.db.connection import close_pool, init_db
@@ -42,9 +42,19 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": "Invalid or missing API key."}, status_code=401)
 
     app.include_router(router)
+    app.include_router(observability_router)
     static_dir = _ui_static_dir()
     if static_dir:
-        app.mount("/app", StaticFiles(directory=static_dir, html=True), name="document-agent-ui")
+        _index = static_dir / "index.html"
+
+        @app.get("/app", include_in_schema=False)
+        @app.get("/app/{catchall:path}", include_in_schema=False)
+        async def _serve_spa(catchall: str = "") -> Response:
+            candidate = static_dir / catchall if catchall else None
+            if candidate and candidate.is_file():
+                return FileResponse(str(candidate))
+            return FileResponse(str(_index))
+
     return app
 
 def _is_request_authorized(request: Request, settings: Settings) -> bool:
