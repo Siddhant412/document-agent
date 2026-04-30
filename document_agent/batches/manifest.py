@@ -6,6 +6,7 @@ from typing import Any, Dict, List
 from uuid import UUID, uuid4
 from zipfile import ZIP_DEFLATED, ZipFile
 
+from document_agent.assets import count_document_assets
 from document_agent.db.repository import Repository
 from document_agent.storage import ObjectStore
 from document_agent.utils import unique_names
@@ -33,7 +34,7 @@ def build_batch_manifest(
                 "status": job["status"],
                 "markdown_url": markdown_url,
                 "markdown_filename": markdown_names[index] if job["status"] == "succeeded" else None,
-                "asset_count": len([asset for asset in assets if asset["role"] != "markdown_result"]),
+                "asset_count": count_document_assets(assets),
                 "error_code": job.get("error_code"),
                 "error_message": job.get("error_message"),
             }

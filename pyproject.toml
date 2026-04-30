@@ -47,8 +47,8 @@ dev = [
 document-agent = "document_agent.cli.main:app"
 
 [tool.setuptools.packages.find]
-where = ["."]
-include = ["document_agent*"]
+where = [".", "vendor"]
+include = ["document_agent*", "improved_ocr_agent*", "ia_phase1*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -22,11 +22,18 @@ def detect_file_type(path: Path, filename: str, content_type: Optional[str] = No
         return "png"
     if header.startswith(b"\xff\xd8"):
         return "jpg"
-    if b"ftypheic" in header[:32] or b"ftypheix" in header[:32] or b"ftypmif1" in header[:32]:
+    heif_brands = (b"ftypheic", b"ftypheix", b"ftypheif", b"ftyphevc", b"ftypheim", b"ftypheis", b"ftypmif1")
+    if any(brand in header[:32] for brand in heif_brands):
         return "heic"
-    if header.startswith(b"PK\x03\x04") and suffix == "docx":
+    if header.startswith(b"PK\x03\x04") and (
+        suffix == "docx"
+        or content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+    ):
         return "docx"
-    if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") and suffix == "doc":
+    if header.startswith(b"\xd0\xcf\x11\xe0\xa1\xb1\x1a\xe1") and (
+        suffix == "doc"
+        or content_type == "application/msword"
+    ):
         return "doc"
     if content_type in {"application/pdf"}:
         return "pdf"
@@ -38,6 +45,10 @@ def detect_file_type(path: Path, filename: str, content_type: Optional[str] = No
         return "heic"
     if content_type in {"text/plain", "text/markdown"}:
         return "txt"
+    if content_type == "application/vnd.openxmlformats-officedocument.wordprocessingml.document":
+        return "docx"
+    if content_type == "application/msword":
+        return "doc"
     if suffix in SUPPORTED_TYPES:
         return "jpg" if suffix == "jpeg" else suffix
 
@@ -55,4 +66,3 @@ def detect_file_type(path: Path, filename: str, content_type: Optional[str] = No
         retryable=False,
         details={"content_type": content_type, "suffix": suffix},
     )
-

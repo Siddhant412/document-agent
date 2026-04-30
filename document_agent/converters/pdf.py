@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any, Optional
 
 import fitz
 
@@ -9,6 +10,7 @@ from document_agent.converters.assets import upload_assets_and_rewrite_markdown
 from document_agent.converters.base import ConversionContext, ConversionResult, Converter
 from document_agent.converters.markdown import with_frontmatter
 from document_agent.errors import DocumentAgentError
+from document_agent.ocr import OcrClient
 
 
 class PdfConverter(Converter):
@@ -44,26 +46,11 @@ class PdfConverter(Converter):
     def _convert_with_vendor(self, context: ConversionContext, *, page_count: int) -> ConversionResult:
         _ensure_vendor_import_path()
 
-        from improved_ocr_agent.hybrid_pdf_extractor import (  # type: ignore
-            HybridPDFExtractor,
-            PipelineCustomOCRBackend,
-        )
+        from improved_ocr_agent.hybrid_pdf_extractor import HybridPDFExtractor  # type: ignore
 
         ocr_backend = None
         if context.settings.ocr_server_url:
-            from improved_ocr_agent.pipeline_custom import make_ocr_args  # type: ignore
-
-            args = make_ocr_args(
-                server=context.settings.ocr_server_url,
-                model=context.settings.ocr_model,
-                workspace=str(context.temp_dir / "ocr_workspace"),
-                api_key=context.settings.ocr_api_key,
-                page_max_tokens=context.settings.ocr_page_max_tokens,
-                target_longest_image_dim=context.settings.ocr_target_longest_image_dim,
-                save_rendered_pages=False,
-                materialize_assets=False,
-            )
-            ocr_backend = PipelineCustomOCRBackend(args)
+            ocr_backend = _DocumentAgentOcrBackend(settings=context.settings)
 
         context.repository.update_progress(
             job_id=context.job_id,
@@ -78,6 +65,8 @@ class PdfConverter(Converter):
         )
         result = extractor.extract_to_dict()
         markdown = str(result.get("markdown") or "")
+        if not markdown.strip() or "[OCR unavailable for page" in markdown:
+            raise RuntimeError("Vendor PDF extractor returned empty Markdown.")
         assets_dir = Path(str(result.get("assets_dir") or ""))
         markdown, uploaded = upload_assets_and_rewrite_markdown(
             context,
@@ -152,3 +141,27 @@ def _ensure_vendor_import_path() -> None:
         if (vendor_root / "improved_ocr_agent").is_dir() and str(vendor_root) not in sys.path:
             sys.path.insert(0, str(vendor_root))
             return
+
+
+class _DocumentAgentOcrBackend:
+    def __init__(self, *, settings: Any) -> None:
+        self.client = OcrClient(settings)
+
+    def ocr_page_image(
+        self,
+        image_path: str,
+        page_num: int,
+        page_hint: Optional[dict[str, Any]] = None,
+    ) -> str:
+        return self.client.ocr_image_bytes(Path(image_path).read_bytes(), page_num=page_num)
+
+    def ocr_pdf_page(
+        self,
+        pdf_path: str,
+        page_num: int,
+        page_hint: Optional[dict[str, Any]] = None,
+    ) -> str:
+        with fitz.open(pdf_path) as doc:
+            page = doc[page_num - 1]
+            pixmap = page.get_pixmap(matrix=fitz.Matrix(2, 2), alpha=False)
+            return self.client.ocr_image_bytes(pixmap.tobytes("png"), page_num=page_num)

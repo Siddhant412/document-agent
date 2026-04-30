@@ -66,17 +66,18 @@ def upload_assets_and_rewrite_markdown(
         return markdown, []
 
     files = [path for path in assets_root.rglob("*") if path.is_file()]
+    referenced_paths = _markdown_image_paths(markdown)
     replacements: Dict[str, str] = {}
     uploaded: list[UploadedAsset] = []
     for path in files:
         role = _role_for_path(path)
+        aliases = _path_aliases(path=path, assets_root=assets_root)
+        if role in {"embedded_image", "equation_image"} and not referenced_paths.intersection(aliases):
+            continue
         item = upload_asset_file(context, path=path, role=role)
         uploaded.append(item)
-        rel = path.relative_to(assets_root).as_posix()
-        replacements[rel] = item.public_url
-        replacements[f"{assets_root.name}/{rel}"] = item.public_url
-        replacements[path.name] = item.public_url
-        replacements[path.as_posix()] = item.public_url
+        for alias in aliases:
+            replacements[alias] = item.public_url
 
     rewritten = markdown
     for old, new in sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True):
@@ -93,6 +94,20 @@ def rewrite_markdown_image_paths(markdown: str, path_to_url: Dict[str, str]) -> 
         return f"![{match.group('alt')}]({replacement})"
 
     return _MD_IMAGE_RE.sub(repl, markdown)
+
+
+def _markdown_image_paths(markdown: str) -> set[str]:
+    return {match.group("path").strip() for match in _MD_IMAGE_RE.finditer(markdown)}
+
+
+def _path_aliases(*, path: Path, assets_root: Path) -> set[str]:
+    rel = path.relative_to(assets_root).as_posix()
+    return {
+        rel,
+        f"{assets_root.name}/{rel}",
+        path.name,
+        path.as_posix(),
+    }
 
 
 def _role_for_path(path: Path) -> str:

@@ -5,7 +5,7 @@ import subprocess
 
 from document_agent.converters.assets import upload_assets_and_rewrite_markdown
 from document_agent.converters.base import ConversionContext, ConversionResult, Converter
-from document_agent.converters.markdown import with_frontmatter
+from document_agent.converters.markdown import rewrite_frontmatter_fields, with_frontmatter
 from document_agent.converters.pdf import PdfConverter
 from document_agent.errors import DocumentAgentError
 
@@ -128,6 +128,14 @@ class OfficeConverter(Converter):
             context.detected_type = "pdf"
             result = PdfConverter().convert(context)
             result.detected_type = original_type
+            result.markdown = rewrite_frontmatter_fields(
+                result.markdown,
+                {
+                    "source_filename": context.filename,
+                    "detected_type": original_type,
+                    "office_converter": "libreoffice_pdf",
+                },
+            )
             result.metadata["office_converter"] = "libreoffice_pdf"
             return result
         finally:

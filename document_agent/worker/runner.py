@@ -11,11 +11,13 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 from uuid import UUID, uuid4
 
+from prometheus_client import start_http_server
+
 from document_agent.config import Settings, get_settings
 from document_agent.converters.pipeline import ConversionPipeline
 from document_agent.db.connection import init_db
 from document_agent.db.repository import Repository
-from document_agent.errors import error_from_exception
+from document_agent.errors import DocumentAgentError, error_from_exception
 from document_agent.logging_config import configure_logging
 from document_agent.metrics import CONVERSION_DURATION_SECONDS, JOBS_COMPLETED
 from document_agent.status import TERMINAL_JOB_STATUSES
@@ -49,6 +51,7 @@ class Worker:
         configure_logging(self.settings.log_level)
         init_db(self.settings)
         self.object_store.ensure_bucket()
+        self._start_metrics_server()
         logger.info("worker_start worker_id=%s", self.worker_id)
         while not self._stop.is_set():
             self._maintenance_if_due()
@@ -129,7 +132,10 @@ class Worker:
                 terminal = bool(current and current["status"] in TERMINAL_JOB_STATUSES)
         except Exception as exc:
             error = error_from_exception(exc)
-            logger.exception("job_failed job_id=%s code=%s", job_id, error.code)
+            if isinstance(exc, DocumentAgentError) and not error.retryable:
+                logger.warning("job_failed job_id=%s code=%s message=%s", job_id, error.code, error.message)
+            else:
+                logger.exception("job_failed job_id=%s code=%s", job_id, error.code)
             self.repository.mark_job_failed(
                 job_id=job_id,
                 code=error.code,
@@ -281,6 +287,19 @@ class Worker:
                 self.object_store.delete_object(bucket=self.object_store.bucket, object_key=object_key)
         except Exception:
             logger.exception("staging_orphan_cleanup_failed")
+
+    def _start_metrics_server(self) -> None:
+        if self.settings.worker_metrics_port <= 0:
+            return
+        start_http_server(
+            port=self.settings.worker_metrics_port,
+            addr=self.settings.worker_metrics_host,
+        )
+        logger.info(
+            "worker_metrics_start host=%s port=%s",
+            self.settings.worker_metrics_host,
+            self.settings.worker_metrics_port,
+        )
 
 
 def run_worker() -> None:

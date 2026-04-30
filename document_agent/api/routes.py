@@ -19,6 +19,7 @@ from document_agent.api.schemas import (
 )
 from document_agent.api.sse import events_response
 from document_agent.api.uploads import StagedUpload, parse_metadata_json, stage_upload, staged_jobs_payload
+from document_agent.assets import count_document_assets
 from document_agent.batches.manifest import (
     build_batch_archive,
     build_batch_manifest,
@@ -27,7 +28,7 @@ from document_agent.batches.manifest import (
 from document_agent.config import Settings, get_settings
 from document_agent.db.repository import Repository
 from document_agent.metrics import BATCHES_CREATED, JOBS_CREATED
-from document_agent.status import TERMINAL_BATCH_STATUSES
+from document_agent.status import TERMINAL_BATCH_STATUSES, batch_percent_from_jobs
 from document_agent.storage import ObjectStore
 
 router = APIRouter()
@@ -218,7 +219,7 @@ def get_job_result(
         markdown=markdown,
         metadata={
             "filename": row["filename"],
-            "asset_count": len([item for item in assets if item["role"] != "markdown_result"]),
+            "asset_count": count_document_assets(assets),
         },
     )
 
@@ -358,6 +359,7 @@ def get_batch(
     return BatchStatusResponse(
         batch_id=batch_id,
         status=batch["status"],
+        percent=batch_percent_from_jobs(jobs),
         batch_name=batch.get("batch_name"),
         total_files=int(batch["total_files"]),
         succeeded_count=int(batch["succeeded_count"]),
@@ -437,6 +439,7 @@ def delete_batch(
     return BatchStatusResponse(
         batch_id=batch_id,
         status=batch["status"],
+        percent=batch_percent_from_jobs(jobs),
         batch_name=batch.get("batch_name"),
         total_files=int(batch["total_files"]),
         succeeded_count=int(batch["succeeded_count"]),

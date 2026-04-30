@@ -40,3 +40,29 @@ def frontmatter(
 def with_frontmatter(body: str, **kwargs: Any) -> str:
     return frontmatter(**kwargs) + body.strip() + "\n"
 
+
+def rewrite_frontmatter_fields(markdown: str, fields: Dict[str, Any]) -> str:
+    if not markdown.startswith("---\n"):
+        return markdown
+    try:
+        end = markdown.index("\n---\n", 4)
+    except ValueError:
+        return markdown
+    front = markdown[4:end].splitlines()
+    seen: set[str] = set()
+    updated = []
+    for line in front:
+        key = line.split(":", 1)[0].strip()
+        if key in fields:
+            value = fields[key]
+            rendered = repr(value) if isinstance(value, str) else str(value)
+            updated.append(f"{key}: {rendered}")
+            seen.add(key)
+        else:
+            updated.append(line)
+    for key, value in fields.items():
+        if key in seen:
+            continue
+        rendered = repr(value) if isinstance(value, str) else str(value)
+        updated.append(f"{key}: {rendered}")
+    return "---\n" + "\n".join(updated) + markdown[end:]

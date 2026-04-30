@@ -26,6 +26,19 @@ CONVERSION_DURATION_SECONDS = Histogram(
     buckets=(0.5, 1, 2.5, 5, 10, 30, 60, 120, 300, 600, 1800, 3600),
 )
 
+OCR_REQUESTS = Counter(
+    "document_agent_ocr_requests_total",
+    "OCR provider requests.",
+    ("status", "model", "error_code"),
+)
+
+OCR_REQUEST_DURATION_SECONDS = Histogram(
+    "document_agent_ocr_request_duration_seconds",
+    "OCR provider request duration.",
+    ("status", "model"),
+    buckets=(0.5, 1, 2.5, 5, 10, 20, 30, 60, 120, 240),
+)
+
 ASSETS_UPLOADED = Counter(
     "document_agent_assets_uploaded_total",
     "Assets uploaded to object storage.",

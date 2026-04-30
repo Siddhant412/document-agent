@@ -25,3 +25,14 @@ def batch_status_from_counts(
         return "cancelled"
     return "failed"
 
+
+def batch_percent_from_jobs(jobs: list[dict[str, object]]) -> int:
+    if not jobs:
+        return 0
+    total = 0
+    for job in jobs:
+        if str(job.get("status") or "") in TERMINAL_JOB_STATUSES:
+            total += 100
+        else:
+            total += max(0, min(100, int(job.get("percent") or 0)))
+    return round(total / len(jobs))

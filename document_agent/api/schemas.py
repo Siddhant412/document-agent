@@ -58,6 +58,7 @@ class JobStatusResponse(BaseModel):
 class BatchStatusResponse(BaseModel):
     batch_id: UUID
     status: str
+    percent: int
     batch_name: Optional[str] = None
     total_files: int
     succeeded_count: int
@@ -99,4 +100,3 @@ class BatchResultResponse(BaseModel):
     manifest_url: Optional[str] = None
     archive_url: Optional[str] = None
     files: List[BatchManifestFile]
-

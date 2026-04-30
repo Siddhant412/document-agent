@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     worker_poll_interval_seconds: float = 2.0
     worker_lease_seconds: int = 300
     worker_lease_heartbeat_seconds: int = 30
+    worker_metrics_host: str = "0.0.0.0"
+    worker_metrics_port: int = 8081
     job_max_attempts: int = 3
     job_timeout_seconds: int = 3600
     batch_timeout_seconds: int = 14400
