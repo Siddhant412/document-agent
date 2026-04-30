@@ -20,6 +20,7 @@ from document_agent.db.repository import Repository
 from document_agent.errors import DocumentAgentError, error_from_exception
 from document_agent.logging_config import configure_logging
 from document_agent.metrics import CONVERSION_DURATION_SECONDS, JOBS_COMPLETED
+from document_agent.previews import ensure_preview
 from document_agent.status import TERMINAL_JOB_STATUSES
 from document_agent.storage import ObjectStore
 from document_agent.utils import safe_filename
@@ -87,7 +88,7 @@ class Worker:
                 job_id=job_id,
                 stage="download_source",
                 percent=5,
-                message="Downloading staged source object.",
+                message="Downloading durable original object.",
             )
             self.object_store.download_to_path(
                 bucket=job["source_bucket"],
@@ -100,8 +101,17 @@ class Worker:
                 percent=15,
                 message="Starting document conversion.",
             )
+            ensure_preview(
+                job=job,
+                source_path=source_path,
+                temp_dir=temp_dir,
+                repository=self.repository,
+                object_store=self.object_store,
+                settings=self.settings,
+            )
             result = self.pipeline.convert(
                 job_id=job_id,
+                library_item_id=UUID(str(job["library_item_id"])) if job.get("library_item_id") else None,
                 batch_id=UUID(str(job["batch_id"])) if job.get("batch_id") else None,
                 input_index=job.get("input_index"),
                 source_path=source_path,
@@ -158,8 +168,6 @@ class Worker:
         finally:
             heartbeat_stop.set()
             heartbeat.join(timeout=2)
-            if terminal:
-                self._delete_staged_source(job)
             shutil.rmtree(temp_dir, ignore_errors=True)
 
     def _heartbeat(self, job_id: UUID, stop: threading.Event) -> None:
@@ -197,6 +205,7 @@ class Worker:
         )
         row = self.repository.create_asset(
             asset_id=asset_id,
+            library_item_id=UUID(str(job["library_item_id"])) if job.get("library_item_id") else None,
             batch_id=UUID(str(job["batch_id"])) if job.get("batch_id") else None,
             job_id=job_id,
             role="markdown_result",
@@ -230,6 +239,7 @@ class Worker:
         )
         self.repository.create_asset(
             asset_id=asset_id,
+            library_item_id=UUID(str(job["library_item_id"])) if job.get("library_item_id") else None,
             batch_id=UUID(str(job["batch_id"])) if job.get("batch_id") else None,
             job_id=job_id,
             role="diagnostic_manifest",
@@ -244,6 +254,8 @@ class Worker:
 
     def _delete_staged_source(self, job: Dict[str, Any]) -> None:
         job_id = UUID(str(job["id"]))
+        if not str(job.get("source_object_key") or "").startswith("staging/jobs/"):
+            return
         if job.get("source_deleted_at"):
             return
         try:
@@ -269,9 +281,8 @@ class Worker:
             timeout_seconds=self.settings.batch_timeout_seconds,
             limit=50,
         )
-        for job in self.repository.list_terminal_jobs_with_sources(limit=100):
-            self._delete_staged_source(job)
         self._cleanup_orphaned_staging_objects()
+        self._cleanup_expired_completed_results()
 
     def _cleanup_orphaned_staging_objects(self) -> None:
         try:
@@ -287,6 +298,33 @@ class Worker:
                 self.object_store.delete_object(bucket=self.object_store.bucket, object_key=object_key)
         except Exception:
             logger.exception("staging_orphan_cleanup_failed")
+
+    def _cleanup_expired_completed_results(self) -> None:
+        try:
+            assets = self.repository.list_expired_completed_assets(
+                retention_seconds=self.settings.completed_result_retention_seconds,
+                limit=500,
+            )
+            if not assets:
+                return
+            deleted_asset_ids = []
+            for asset in assets:
+                try:
+                    self.object_store.delete_object(
+                        bucket=asset["bucket"],
+                        object_key=asset["object_key"],
+                    )
+                    deleted_asset_ids.append(UUID(str(asset["id"])))
+                except Exception:
+                    logger.exception(
+                        "completed_result_object_delete_failed asset_id=%s object_key=%s",
+                        asset.get("id"),
+                        asset.get("object_key"),
+                    )
+            deleted_rows = self.repository.forget_assets(deleted_asset_ids)
+            logger.info("completed_result_cleanup assets_deleted=%s", deleted_rows)
+        except Exception:
+            logger.exception("completed_result_cleanup_failed")
 
     def _start_metrics_server(self) -> None:
         if self.settings.worker_metrics_port <= 0:

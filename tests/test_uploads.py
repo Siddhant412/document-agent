@@ -37,6 +37,9 @@ class FakeUpload:
 class FakeObjectStore:
     bucket = "test-bucket"
 
+    def original_key(self, *, library_item_id: str, filename: str) -> str:
+        return f"library/{library_item_id}/original/{filename}"
+
     def staging_key(self, *, job_id: str, filename: str) -> str:
         return f"staging/jobs/{job_id}/source/{filename}"
 
@@ -69,8 +72,9 @@ def test_stage_upload_preserves_unsupported_file_as_job_metadata() -> None:
 
     assert staged.detected_type == "unsupported"
     assert staged.metadata["detection_error_code"] == "UNSUPPORTED_FILE_TYPE"
-    assert staged.source_object_key.endswith("/archive.bin")
+    assert staged.source_object_key == f"library/{staged.library_item_id}/original/archive.bin"
     assert upload.closed is True
+    assert staged_jobs_payload([staged])[0]["library_item_id"] == staged.library_item_id
     assert staged_jobs_payload([staged])[0]["metadata"]["detection_error_code"] == "UNSUPPORTED_FILE_TYPE"
 
 
@@ -91,7 +95,7 @@ def test_stage_upload_uses_filename_and_content_type_overrides() -> None:
     assert staged.filename == "notes.txt"
     assert staged.content_type == "text/plain"
     assert staged.detected_type == "txt"
-    assert staged.source_object_key.endswith("/notes.txt")
+    assert staged.source_object_key == f"library/{staged.library_item_id}/original/notes.txt"
 
 
 def test_stage_upload_rejects_when_batch_remaining_size_is_exhausted() -> None:

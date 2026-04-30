@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Query, Request, UploadFile, status
@@ -13,9 +13,14 @@ from document_agent.api.schemas import (
     BatchChildJob,
     BatchResultResponse,
     BatchStatusResponse,
+    DeleteLibraryItemResponse,
     JobCreatedResponse,
     JobResultResponse,
     JobStatusResponse,
+    LibraryItemResponse,
+    LibraryListResponse,
+    LibraryMarkdownResponse,
+    ReprocessResponse,
 )
 from document_agent.api.sse import events_response
 from document_agent.api.uploads import StagedUpload, parse_metadata_json, stage_upload, staged_jobs_payload
@@ -64,9 +69,21 @@ def _batch_urls(batch_id: UUID, settings: Settings) -> Dict[str, str]:
     }
 
 
+def _library_urls(library_item_id: UUID, settings: Settings) -> Dict[str, str]:
+    base = _base(settings)
+    return {
+        "library_url": f"{base}/v1/library/{library_item_id}",
+        "original_url": f"{base}/v1/library/{library_item_id}/original",
+        "preview_url": f"{base}/v1/library/{library_item_id}/preview",
+        "markdown_url": f"{base}/v1/library/{library_item_id}/markdown",
+    }
+
+
 def _job_status(row: Dict[str, Any], settings: Settings) -> JobStatusResponse:
     job_id = UUID(str(row["id"]))
+    library_item_id = UUID(str(row["library_item_id"])) if row.get("library_item_id") else None
     return JobStatusResponse(
+        library_item_id=library_item_id,
         job_id=job_id,
         batch_id=UUID(str(row["batch_id"])) if row.get("batch_id") else None,
         input_index=row.get("input_index"),
@@ -88,6 +105,109 @@ def _job_status(row: Dict[str, Any], settings: Settings) -> JobStatusResponse:
         error_message=row.get("error_message"),
         result_url=_job_urls(job_id, settings)["result_url"],
         events_url=_job_urls(job_id, settings)["events_url"],
+    )
+
+
+def _library_item_response(row: Dict[str, Any], settings: Settings) -> LibraryItemResponse:
+    library_item_id = UUID(str(row["id"]))
+    urls = _library_urls(library_item_id, settings)
+    current_job_id = UUID(str(row["current_job_id"])) if row.get("current_job_id") else None
+    return LibraryItemResponse(
+        library_item_id=library_item_id,
+        current_job_id=current_job_id,
+        batch_id=UUID(str(row["batch_id"])) if row.get("batch_id") else None,
+        input_index=row.get("input_index"),
+        filename=row["display_filename"],
+        content_type=row.get("content_type"),
+        detected_type=row.get("detected_type"),
+        sha256=row["sha256"],
+        size_bytes=int(row["size_bytes"]),
+        status=row["status"],
+        stage=row["stage"],
+        percent=int(row["percent"]),
+        preview_status=row.get("preview_status") or "pending",
+        created_at=row["created_at"],
+        updated_at=row["updated_at"],
+        uploaded_at=row["uploaded_at"],
+        processed_at=row.get("processed_at"),
+        error_code=row.get("error_code"),
+        error_message=row.get("error_message"),
+        original_url=urls["original_url"],
+        preview_url=urls["preview_url"],
+        markdown_url=urls["markdown_url"],
+        events_url=_job_urls(current_job_id, settings)["events_url"] if current_job_id else None,
+        has_markdown=bool(row.get("latest_markdown_asset_id")),
+        has_preview=bool(row.get("preview_asset_id")) or row.get("detected_type") in {"jpg", "jpeg", "png", "pdf", "txt"},
+        metadata=row.get("metadata_json") or {},
+    )
+
+
+def _content_disposition(filename: str, *, inline: bool = True) -> str:
+    disposition = "inline" if inline else "attachment"
+    safe = filename.replace("\\", "_").replace('"', "'")
+    return f'{disposition}; filename="{safe}"'
+
+
+def _parse_range_header(range_header: Optional[str], size_bytes: int) -> Optional[Tuple[int, int]]:
+    if not range_header:
+        return None
+    unit, _, value = range_header.partition("=")
+    if unit.strip().lower() != "bytes" or "-" not in value:
+        raise HTTPException(status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+    start_text, _, end_text = value.partition("-")
+    try:
+        if start_text:
+            start = int(start_text)
+            end = int(end_text) if end_text else size_bytes - 1
+        else:
+            suffix_length = int(end_text)
+            start = max(0, size_bytes - suffix_length)
+            end = size_bytes - 1
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE) from exc
+    if start < 0 or end < start or start >= size_bytes:
+        raise HTTPException(status_code=status.HTTP_416_REQUESTED_RANGE_NOT_SATISFIABLE)
+    return start, min(end, size_bytes - 1)
+
+
+def _stream_asset_response(
+    *,
+    asset: Dict[str, Any],
+    object_store: ObjectStore,
+    filename: str,
+    range_header: Optional[str] = None,
+) -> StreamingResponse:
+    size_bytes = int(asset["size_bytes"])
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Disposition": _content_disposition(filename),
+    }
+    byte_range = _parse_range_header(range_header, size_bytes)
+    if byte_range:
+        start, end = byte_range
+        length = end - start + 1
+        headers.update(
+            {
+                "Content-Length": str(length),
+                "Content-Range": f"bytes {start}-{end}/{size_bytes}",
+            }
+        )
+        return StreamingResponse(
+            object_store.iter_object_range(
+                bucket=asset["bucket"],
+                object_key=asset["object_key"],
+                offset=start,
+                length=length,
+            ),
+            media_type=asset["mime_type"],
+            headers=headers,
+            status_code=status.HTTP_206_PARTIAL_CONTENT,
+        )
+    headers["Content-Length"] = str(size_bytes)
+    return StreamingResponse(
+        object_store.iter_object(bucket=asset["bucket"], object_key=asset["object_key"]),
+        media_type=asset["mime_type"],
+        headers=headers,
     )
 
 
@@ -127,7 +247,17 @@ async def create_job(
         existing = await run_in_threadpool(repository.get_job_by_idempotency_key, idempotency_key)
         if existing:
             job_id = UUID(str(existing["id"]))
-            return JobCreatedResponse(job_id=job_id, status=existing["status"], **_job_urls(job_id, settings))
+            library_item_id = (
+                UUID(str(existing["library_item_id"])) if existing.get("library_item_id") else None
+            )
+            library_url = _library_urls(library_item_id, settings)["library_url"] if library_item_id else None
+            return JobCreatedResponse(
+                library_item_id=library_item_id,
+                job_id=job_id,
+                status=existing["status"],
+                library_url=library_url,
+                **_job_urls(job_id, settings),
+            )
 
     metadata = parse_metadata_json(metadata_json)
     staged = await stage_upload(
@@ -141,6 +271,7 @@ async def create_job(
     try:
         row = await run_in_threadpool(
             repository.create_job,
+            library_item_id=staged.library_item_id,
             job_id=staged.job_id,
             filename=staged.filename,
             content_type=staged.content_type,
@@ -160,8 +291,15 @@ async def create_job(
         )
         raise
     job_id = UUID(str(row["id"]))
+    library_item_id = UUID(str(row["library_item_id"]))
     JOBS_CREATED.labels(submission_type="single", detected_type=str(row["detected_type"])).inc()
-    return JobCreatedResponse(job_id=job_id, status=row["status"], **_job_urls(job_id, settings))
+    return JobCreatedResponse(
+        library_item_id=library_item_id,
+        job_id=job_id,
+        status=row["status"],
+        library_url=_library_urls(library_item_id, settings)["library_url"],
+        **_job_urls(job_id, settings),
+    )
 
 
 @router.get("/v1/jobs/{job_id}", response_model=JobStatusResponse)
@@ -202,10 +340,10 @@ def get_job_result(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Job is not complete.")
     asset_id = row.get("result_markdown_asset_id")
     if not asset_id:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Missing Markdown asset.")
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Markdown result expired.")
     asset = repository.get_asset(UUID(str(asset_id)))
     if not asset:
-        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Markdown asset not found.")
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Markdown result expired.")
     markdown = None
     if include_markdown:
         data = object_store.read_object_bytes(bucket=asset["bucket"], object_key=asset["object_key"])
@@ -252,6 +390,188 @@ def get_asset(
     )
 
 
+@router.get("/v1/library", response_model=LibraryListResponse)
+def list_library(
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    status_filter: Optional[str] = Query(default=None, alias="status"),
+    detected_type: Optional[str] = Query(default=None),
+    batch_id: Optional[UUID] = Query(default=None),
+    q: Optional[str] = Query(default=None),
+    settings: Settings = Depends(get_settings),
+    repository: Repository = Depends(get_repository),
+) -> LibraryListResponse:
+    rows = repository.list_library_items(
+        limit=limit,
+        offset=offset,
+        status_filter=status_filter,
+        detected_type=detected_type,
+        batch_id=batch_id,
+        query=q,
+    )
+    return LibraryListResponse(
+        items=[_library_item_response(row, settings) for row in rows],
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/v1/library/{library_item_id}", response_model=LibraryItemResponse)
+def get_library_item(
+    library_item_id: UUID,
+    settings: Settings = Depends(get_settings),
+    repository: Repository = Depends(get_repository),
+) -> LibraryItemResponse:
+    row = repository.get_library_item(library_item_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+    return _library_item_response(row, settings)
+
+
+@router.get("/v1/library/{library_item_id}/original")
+def get_library_original(
+    library_item_id: UUID,
+    range_header: Optional[str] = Header(default=None, alias="Range"),
+    repository: Repository = Depends(get_repository),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> StreamingResponse:
+    item = repository.get_library_item(library_item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+    if not item.get("original_asset_id"):
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Original file is unavailable.")
+    asset = repository.get_asset(UUID(str(item["original_asset_id"])))
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Original file is unavailable.")
+    return _stream_asset_response(
+        asset=asset,
+        object_store=object_store,
+        filename=item["display_filename"],
+        range_header=range_header,
+    )
+
+
+@router.get("/v1/library/{library_item_id}/preview")
+def get_library_preview(
+    library_item_id: UUID,
+    range_header: Optional[str] = Header(default=None, alias="Range"),
+    repository: Repository = Depends(get_repository),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> StreamingResponse:
+    item = repository.get_library_item(library_item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+
+    detected_type = str(item.get("detected_type") or "").lower()
+    if detected_type in {"jpg", "jpeg", "png", "pdf", "txt"}:
+        if not item.get("original_asset_id"):
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="Original file is unavailable.")
+        asset = repository.get_asset(UUID(str(item["original_asset_id"])))
+        if not asset:
+            raise HTTPException(status_code=status.HTTP_410_GONE, detail="Original file is unavailable.")
+        return _stream_asset_response(
+            asset=asset,
+            object_store=object_store,
+            filename=item["display_filename"],
+            range_header=range_header,
+        )
+
+    if item.get("preview_asset_id"):
+        asset = repository.get_asset(UUID(str(item["preview_asset_id"])))
+        if asset:
+            return _stream_asset_response(
+                asset=asset,
+                object_store=object_store,
+                filename=f"{item['display_filename']}.preview",
+                range_header=range_header,
+            )
+
+    detail = "Preview generation failed." if item.get("preview_status") == "failed" else "Preview is not ready."
+    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=detail)
+
+
+@router.get("/v1/library/{library_item_id}/markdown", response_model=LibraryMarkdownResponse)
+def get_library_markdown(
+    library_item_id: UUID,
+    include_markdown: bool = False,
+    repository: Repository = Depends(get_repository),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> LibraryMarkdownResponse:
+    item = repository.get_library_item(library_item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+    if item["status"] != "succeeded":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Library item is not complete.")
+    asset_id = item.get("latest_markdown_asset_id")
+    if not asset_id:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Markdown result expired.")
+    asset = repository.get_asset(UUID(str(asset_id)))
+    if not asset:
+        raise HTTPException(status_code=status.HTTP_410_GONE, detail="Markdown result expired.")
+    markdown = None
+    if include_markdown:
+        data = object_store.read_object_bytes(bucket=asset["bucket"], object_key=asset["object_key"])
+        markdown = data.decode("utf-8", errors="replace")
+    return LibraryMarkdownResponse(
+        library_item_id=library_item_id,
+        job_id=UUID(str(item["current_job_id"])) if item.get("current_job_id") else None,
+        status=item["status"],
+        markdown_url=asset["public_url"],
+        asset_id=UUID(str(asset["id"])),
+        markdown=markdown,
+        metadata={
+            "filename": item["display_filename"],
+            "detected_type": item.get("detected_type"),
+        },
+    )
+
+
+@router.post("/v1/library/{library_item_id}/reprocess", response_model=ReprocessResponse)
+def reprocess_library_item(
+    library_item_id: UUID,
+    settings: Settings = Depends(get_settings),
+    repository: Repository = Depends(get_repository),
+) -> ReprocessResponse:
+    row = repository.create_reprocess_job(library_item_id)
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+    job_id = UUID(str(row["id"]))
+    JOBS_CREATED.labels(submission_type="reprocess", detected_type=str(row["detected_type"])).inc()
+    return ReprocessResponse(
+        library_item_id=library_item_id,
+        job_id=job_id,
+        status=row["status"],
+        library_url=_library_urls(library_item_id, settings)["library_url"],
+        **_job_urls(job_id, settings),
+    )
+
+
+@router.delete("/v1/library/{library_item_id}", response_model=DeleteLibraryItemResponse)
+def delete_library_item(
+    library_item_id: UUID,
+    repository: Repository = Depends(get_repository),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> DeleteLibraryItemResponse:
+    item = repository.get_library_item(library_item_id)
+    if not item:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Library item not found.")
+    assets = repository.list_library_assets(library_item_id)
+    deleted_objects = 0
+    for asset in assets:
+        try:
+            object_store.delete_object(bucket=asset["bucket"], object_key=asset["object_key"])
+            deleted_objects += 1
+        except Exception:
+            # DB tombstoning still proceeds so repeated delete calls do not leave an active item.
+            pass
+    deleted_assets = repository.delete_library_item_records(library_item_id)
+    return DeleteLibraryItemResponse(
+        library_item_id=library_item_id,
+        deleted=True,
+        deleted_assets=max(deleted_assets, deleted_objects),
+    )
+
+
 @router.post("/v1/batches", response_model=BatchCreatedResponse, status_code=status.HTTP_202_ACCEPTED)
 async def create_batch(
     files: List[UploadFile] = File(...),
@@ -272,6 +592,7 @@ async def create_batch(
                 status=existing["status"],
                 child_jobs=[
                     {
+                        "library_item_id": job.get("library_item_id"),
                         "job_id": job["id"],
                         "input_index": int(job["input_index"]),
                         "filename": job["filename"],
@@ -335,6 +656,7 @@ async def create_batch(
         status=row["status"],
         child_jobs=[
             BatchChildJob(
+                library_item_id=item.library_item_id,
                 job_id=item.job_id,
                 input_index=int(item.input_index or 0),
                 filename=item.filename,

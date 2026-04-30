@@ -41,6 +41,7 @@ def events_response(
                         event_type=str(row["event_type"]),
                         data={
                             "id": row["id"],
+                            "library_item_id": row.get("library_item_id"),
                             "batch_id": row.get("batch_id"),
                             "job_id": row.get("job_id"),
                             "stage": row.get("stage"),
@@ -58,4 +59,3 @@ def events_response(
             await asyncio.sleep(poll_seconds)
 
     return StreamingResponse(stream(), media_type="text/event-stream")
-

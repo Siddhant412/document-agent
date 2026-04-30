@@ -1,3 +1,12 @@
+FROM node:20-bookworm-slim AS ui-build
+
+WORKDIR /ui
+
+COPY frontend/package*.json ./
+RUN npm ci
+COPY frontend ./
+RUN npm run build
+
 FROM python:3.11-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -23,6 +32,7 @@ COPY pyproject.toml README.md ./
 COPY document_agent ./document_agent
 COPY migrations ./migrations
 COPY vendor ./vendor
+COPY --from=ui-build /ui/dist ./document_agent/ui_dist
 
 RUN python -m pip install --upgrade pip \
     && python -m pip install .

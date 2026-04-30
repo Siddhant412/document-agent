@@ -20,6 +20,7 @@ from document_agent.utils import safe_filename
 
 @dataclass
 class StagedUpload:
+    library_item_id: UUID
     job_id: UUID
     input_index: Optional[int]
     filename: str
@@ -65,6 +66,7 @@ async def stage_upload(
         filename_override or upload.filename or f"upload-{input_index or 0}",
         default="document",
     )
+    library_item_id = uuid4()
     job_id = uuid4()
     content_type = content_type_override or upload.content_type
     max_allowed = max_bytes if max_bytes is not None else settings.max_upload_bytes
@@ -107,7 +109,13 @@ async def stage_upload(
                 }
             )
 
-        object_key = object_store.staging_key(job_id=str(job_id), filename=filename)
+        if hasattr(object_store, "original_key"):
+            object_key = object_store.original_key(
+                library_item_id=str(library_item_id),
+                filename=filename,
+            )
+        else:
+            object_key = object_store.staging_key(job_id=str(job_id), filename=filename)
         info = await run_in_threadpool(
             object_store.upload_file,
             path=tmp_path,
@@ -115,6 +123,7 @@ async def stage_upload(
             mime_type=content_type or "application/octet-stream",
         )
         return StagedUpload(
+            library_item_id=library_item_id,
             job_id=job_id,
             input_index=input_index,
             filename=filename,
@@ -136,6 +145,7 @@ def staged_jobs_payload(items: List[StagedUpload]) -> List[Dict[str, Any]]:
     return [
         {
             "job_id": item.job_id,
+            "library_item_id": item.library_item_id,
             "input_index": item.input_index,
             "filename": item.filename,
             "content_type": item.content_type,

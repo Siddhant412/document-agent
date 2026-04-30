@@ -50,8 +50,12 @@ document-agent = "document_agent.cli.main:app"
 where = [".", "vendor"]
 include = ["document_agent*", "improved_ocr_agent*", "ia_phase1*"]
 
+[tool.setuptools.package-data]
+document_agent = ["ui_dist/**"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = [".", "vendor"]
 
 [tool.ruff]
 line-length = 100

@@ -14,11 +14,14 @@ class UrlsMixin(BaseModel):
 
 
 class JobCreatedResponse(UrlsMixin):
+    library_item_id: Optional[UUID] = None
     job_id: UUID
     status: str
+    library_url: Optional[str] = None
 
 
 class BatchChildJob(BaseModel):
+    library_item_id: Optional[UUID] = None
     job_id: UUID
     input_index: int
     filename: str
@@ -32,6 +35,7 @@ class BatchCreatedResponse(UrlsMixin):
 
 
 class JobStatusResponse(BaseModel):
+    library_item_id: Optional[UUID] = None
     job_id: UUID
     batch_id: Optional[UUID] = None
     input_index: Optional[int] = None
@@ -85,6 +89,7 @@ class JobResultResponse(BaseModel):
 class BatchManifestFile(BaseModel):
     input_index: Optional[int]
     filename: str
+    library_item_id: Optional[UUID] = None
     job_id: UUID
     status: str
     markdown_url: Optional[str] = None
@@ -100,3 +105,61 @@ class BatchResultResponse(BaseModel):
     manifest_url: Optional[str] = None
     archive_url: Optional[str] = None
     files: List[BatchManifestFile]
+
+
+class LibraryItemResponse(BaseModel):
+    library_item_id: UUID
+    current_job_id: Optional[UUID] = None
+    batch_id: Optional[UUID] = None
+    input_index: Optional[int] = None
+    filename: str
+    content_type: Optional[str] = None
+    detected_type: Optional[str] = None
+    sha256: str
+    size_bytes: int
+    status: str
+    stage: str
+    percent: int
+    preview_status: str
+    created_at: datetime
+    updated_at: datetime
+    uploaded_at: datetime
+    processed_at: Optional[datetime] = None
+    error_code: Optional[str] = None
+    error_message: Optional[str] = None
+    original_url: str
+    preview_url: str
+    markdown_url: str
+    events_url: Optional[str] = None
+    has_markdown: bool = False
+    has_preview: bool = False
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class LibraryListResponse(BaseModel):
+    items: List[LibraryItemResponse]
+    limit: int
+    offset: int
+
+
+class LibraryMarkdownResponse(BaseModel):
+    library_item_id: UUID
+    job_id: Optional[UUID] = None
+    status: str
+    markdown_url: Optional[str] = None
+    asset_id: Optional[UUID] = None
+    markdown: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ReprocessResponse(UrlsMixin):
+    library_item_id: UUID
+    job_id: UUID
+    status: str
+    library_url: str
+
+
+class DeleteLibraryItemResponse(BaseModel):
+    library_item_id: UUID
+    deleted: bool
+    deleted_assets: int

@@ -45,8 +45,23 @@ class ObjectStore:
     def public_url_for_asset(self, asset_id: str) -> str:
         return f"{self.settings.public_base_url.rstrip('/')}/v1/assets/{asset_id}"
 
+    def public_url_for_library_original(self, library_item_id: str) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/original"
+
+    def public_url_for_library_preview(self, library_item_id: str) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/preview"
+
+    def public_url_for_library_markdown(self, library_item_id: str) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/markdown"
+
     def staging_key(self, *, job_id: str, filename: str) -> str:
         return f"staging/jobs/{job_id}/source/{safe_filename(filename)}"
+
+    def original_key(self, *, library_item_id: str, filename: str) -> str:
+        return f"library/{library_item_id}/original/{safe_filename(filename)}"
+
+    def preview_key(self, *, library_item_id: str, filename: str) -> str:
+        return f"library/{library_item_id}/previews/{safe_filename(filename, default='preview')}"
 
     def markdown_key(self, *, job_id: str) -> str:
         return f"jobs/{job_id}/result/document.md"
@@ -152,6 +167,23 @@ class ObjectStore:
 
     def iter_object(self, *, bucket: str, object_key: str, chunk_size: int = 1024 * 1024) -> Iterator[bytes]:
         response = self.client.get_object(bucket, object_key)
+        try:
+            for chunk in response.stream(chunk_size):
+                yield chunk
+        finally:
+            response.close()
+            response.release_conn()
+
+    def iter_object_range(
+        self,
+        *,
+        bucket: str,
+        object_key: str,
+        offset: int,
+        length: int,
+        chunk_size: int = 1024 * 1024,
+    ) -> Iterator[bytes]:
+        response = self.client.get_object(bucket, object_key, offset=offset, length=length)
         try:
             for chunk in response.stream(chunk_size):
                 yield chunk

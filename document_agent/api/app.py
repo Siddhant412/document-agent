@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import secrets
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable
 
 from fastapi import FastAPI, Request
+from fastapi.staticfiles import StaticFiles
 from starlette.responses import JSONResponse, Response
 
 from document_agent.api.routes import router
@@ -40,16 +42,17 @@ def create_app() -> FastAPI:
         return JSONResponse({"detail": "Invalid or missing API key."}, status_code=401)
 
     app.include_router(router)
+    static_dir = _ui_static_dir()
+    if static_dir:
+        app.mount("/app", StaticFiles(directory=static_dir, html=True), name="document-agent-ui")
     return app
-
-
-app = create_app()
-
 
 def _is_request_authorized(request: Request, settings: Settings) -> bool:
     if not settings.api_key:
         return True
     path = request.url.path.rstrip("/") or "/"
+    if path == "/app" or path.startswith("/app/"):
+        return True
     if path in _AUTH_EXEMPT_PATHS:
         return True
     configured = settings.api_key
@@ -58,3 +61,18 @@ def _is_request_authorized(request: Request, settings: Settings) -> bool:
     if not supplied and authorization.lower().startswith("bearer "):
         supplied = authorization.split(" ", 1)[1].strip()
     return bool(supplied and secrets.compare_digest(supplied, configured))
+
+
+def _ui_static_dir() -> Path | None:
+    package_dir = Path(__file__).resolve().parents[1]
+    candidates = [
+        package_dir / "ui_dist",
+        package_dir.parents[0] / "frontend" / "dist",
+    ]
+    for candidate in candidates:
+        if (candidate / "index.html").exists():
+            return candidate
+    return None
+
+
+app = create_app()

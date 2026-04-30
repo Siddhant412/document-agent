@@ -41,6 +41,7 @@ class ConversionPipeline:
         self,
         *,
         job_id: UUID,
+        library_item_id: Optional[UUID] = None,
         batch_id: Optional[UUID],
         input_index: Optional[int],
         source_path: Path,
@@ -66,6 +67,7 @@ class ConversionPipeline:
         converter = self._find_converter(detected_type)
         context = ConversionContext(
             job_id=job_id,
+            library_item_id=library_item_id,
             batch_id=batch_id,
             input_index=input_index,
             source_path=source_path,

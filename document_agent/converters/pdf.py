@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 from typing import Any, Optional
 
@@ -11,6 +10,11 @@ from document_agent.converters.base import ConversionContext, ConversionResult, 
 from document_agent.converters.markdown import with_frontmatter
 from document_agent.errors import DocumentAgentError
 from document_agent.ocr import OcrClient
+
+try:
+    from improved_ocr_agent.hybrid_pdf_extractor import HybridPDFExtractor
+except ImportError:
+    HybridPDFExtractor = None  # type: ignore[assignment]
 
 
 class PdfConverter(Converter):
@@ -44,9 +48,8 @@ class PdfConverter(Converter):
         return self._convert_with_pymupdf(context, page_count=page_count)
 
     def _convert_with_vendor(self, context: ConversionContext, *, page_count: int) -> ConversionResult:
-        _ensure_vendor_import_path()
-
-        from improved_ocr_agent.hybrid_pdf_extractor import HybridPDFExtractor  # type: ignore
+        if HybridPDFExtractor is None:
+            raise RuntimeError("improved_ocr_agent is not importable.")
 
         ocr_backend = None
         if context.settings.ocr_server_url:
@@ -76,6 +79,7 @@ class PdfConverter(Converter):
         markdown = with_frontmatter(
             markdown,
             job_id=context.job_id,
+            library_item_id=context.library_item_id,
             batch_id=context.batch_id,
             filename=context.filename,
             detected_type=context.detected_type,
@@ -105,6 +109,7 @@ class PdfConverter(Converter):
         markdown = with_frontmatter(
             "\n\n".join(lines),
             job_id=context.job_id,
+            library_item_id=context.library_item_id,
             batch_id=context.batch_id,
             filename=context.filename,
             detected_type=context.detected_type,
@@ -129,18 +134,6 @@ def _pdf_page_count(path: Path) -> int:
             message=f"Could not read PDF: {exc}",
             retryable=False,
         ) from exc
-
-
-def _ensure_vendor_import_path() -> None:
-    candidates = [
-        Path(__file__).resolve().parents[2] / "vendor",
-        Path.cwd() / "vendor",
-        Path("/app/vendor"),
-    ]
-    for vendor_root in candidates:
-        if (vendor_root / "improved_ocr_agent").is_dir() and str(vendor_root) not in sys.path:
-            sys.path.insert(0, str(vendor_root))
-            return
 
 
 class _DocumentAgentOcrBackend:

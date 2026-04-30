@@ -62,6 +62,7 @@ class OfficeConverter(Converter):
         markdown = with_frontmatter(
             markdown,
             job_id=context.job_id,
+            library_item_id=context.library_item_id,
             batch_id=context.batch_id,
             filename=context.filename,
             detected_type=context.detected_type,

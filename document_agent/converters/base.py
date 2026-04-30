@@ -34,6 +34,7 @@ class ConversionContext:
     repository: "Repository"
     object_store: "ObjectStore"
     settings: "Settings"
+    library_item_id: Optional[UUID] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 

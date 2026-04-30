@@ -5,9 +5,12 @@ from pathlib import Path
 from types import SimpleNamespace
 from uuid import uuid4
 
+import fitz
+
 from document_agent.converters.base import ConversionContext, ConversionResult
 from document_agent.converters.image import ImageConverter
 from document_agent.converters.office import OfficeConverter
+from document_agent.converters.pdf import PdfConverter
 from document_agent.converters.text import TextConverter
 from document_agent.storage import ObjectInfo
 
@@ -125,6 +128,49 @@ def test_doc_libeoffice_pdf_path_preserves_original_type(monkeypatch, tmp_path: 
     assert context.detected_type == "doc"
 
 
+def test_pdf_vendor_conversion_uploads_referenced_figure(monkeypatch, tmp_path: Path) -> None:
+    source = tmp_path / "figure-paper.pdf"
+    with fitz.open() as doc:
+        page = doc.new_page()
+        page.insert_text((72, 72), "PDF with figure")
+        doc.save(source)
+    repository = _RecordingRepository()
+    object_store = _LocalAssetStore()
+
+    class FakeHybridPDFExtractor:
+        def __init__(self, *, pdf_path: str, ocr_backend, use_pdf_page_ocr: bool) -> None:
+            assert pdf_path == str(source)
+            assert ocr_backend is not None
+            assert use_pdf_page_ocr is False
+
+        def extract_to_dict(self):
+            assets_dir = tmp_path / "pdf_assets"
+            assets_dir.mkdir()
+            (assets_dir / "figure-1.png").write_bytes(b"png")
+            return {
+                "markdown": "# PDF\n\n![Figure 1](figure-1.png)\n",
+                "assets_dir": str(assets_dir),
+            }
+
+    monkeypatch.setattr("document_agent.converters.pdf.HybridPDFExtractor", FakeHybridPDFExtractor)
+    monkeypatch.setattr("document_agent.ocr.client.OcrClient.ocr_image_bytes", lambda *_, **__: "# OCR")
+
+    result = PdfConverter().convert(
+        _context(
+            tmp_path=tmp_path,
+            source_path=source,
+            detected_type="pdf",
+            repository=repository,
+            object_store=object_store,
+        )
+    )
+
+    assert "http://api/v1/assets/" in result.markdown
+    assert "figure-1.png" not in result.markdown
+    assert result.asset_count == 1
+    assert repository.created_assets[0]["role"] == "embedded_image"
+
+
 def _context(
     *,
     tmp_path: Path,
@@ -154,6 +200,8 @@ def _context(
             ocr_page_max_tokens=8000,
             ocr_target_longest_image_dim=1288,
             ocr_max_concurrent_requests=1,
+            max_pdf_pages=500,
+            pdf_use_vendor_extractor=True,
         ),
     )
 

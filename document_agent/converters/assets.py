@@ -35,6 +35,7 @@ def upload_asset_file(
     public_url = context.object_store.public_url_for_asset(str(asset_id))
     row = context.repository.create_asset(
         asset_id=asset_id,
+        library_item_id=context.library_item_id,
         batch_id=context.batch_id,
         job_id=context.job_id,
         role=role,

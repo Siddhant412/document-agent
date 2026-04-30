@@ -45,6 +45,8 @@ class Settings(BaseSettings):
     job_timeout_seconds: int = 3600
     batch_timeout_seconds: int = 14400
     staging_ttl_seconds: int = 86400
+    completed_result_retention_seconds: int = 0
+    original_file_retention_seconds: int = 0
 
     ocr_server_url: Optional[str] = None
     ocr_api_key: Optional[str] = None

@@ -20,9 +20,10 @@ Decisions locked:
 - Execution model: always async jobs.
 - Batch model: first-class batch submissions; each uploaded file becomes an independent child job under one `batch_id`.
 - Worker model: separate worker container using Postgres-backed job leases.
-- Storage: MinIO stores completed Markdown and extracted binary assets.
-- Original uploads: temporary staging only, deleted after processing by default.
-- Image assets: never persisted locally; extracted images are uploaded to MinIO and referenced in Markdown through HTTP URLs.
+- Storage: MinIO stores durable original uploads, generated previews, completed Markdown, and extracted binary assets.
+- Original uploads: retained durably in MinIO as private library source objects, deleted only by explicit library deletion or configured original-retention policy.
+- File library: every upload creates a durable library item; processing is queued in the background and updates that item with preview/result status.
+- Image assets: never persisted locally; extracted images are uploaded to MinIO and referenced in Markdown through HTTP URLs. Source image inputs are retained only as original library files and are not embedded back into Markdown.
 - Security v1: no auth, but keep middleware/config seam for API key auth later.
 - Code reuse: extract/refactor needed `improved_ocr_agent` and `ia_phase1` pieces into clean packages inside `document-agent`.
 - OCR stack: hybrid engines. Use deterministic converters where possible, VLM OCR where needed.
@@ -31,10 +32,10 @@ Decisions locked:
 
 Create a Python repo with these services:
 
-- `api`: FastAPI app for uploads, job status, SSE, and result retrieval.
+- `api`: FastAPI app for uploads, file library, previews, job status, SSE, and result retrieval.
 - `worker`: long-running process that claims pending jobs from Postgres and performs conversion.
-- `postgres`: batch/job metadata, status, file metadata, asset metadata, errors, and event log.
-- `minio`: Markdown output and extracted assets.
+- `postgres`: library, batch/job metadata, status, file metadata, asset metadata, errors, and event log.
+- `minio`: durable original uploads, generated previews, Markdown output, and extracted assets.
 - Optional OCR endpoint: OpenAI-compatible VLM OCR server, configured externally.
 
 Container layout:
@@ -48,6 +49,8 @@ Python package layout:
 - `document_agent/api`: FastAPI routes, SSE, schemas.
 - `document_agent/worker`: job runner, leasing, retries.
 - `document_agent/batches`: batch creation, aggregation, manifests, archive generation.
+- `document_agent/library`: durable upload records, file library queries, deletion/reprocessing policies.
+- `document_agent/previews`: browser preview generation for Office, HEIC, PDFs, images, and text.
 - `document_agent/converters`: file-type routing and converters.
 - `document_agent/ocr`: extracted VLM OCR adapter from `improved_ocr_agent`.
 - `document_agent/pdf`: extracted PDF-to-Markdown logic from `improved_ocr_agent` plus required `ia_phase1` modules.
@@ -63,8 +66,8 @@ Implement these endpoints:
   - Multipart upload field: `file`.
   - Optional fields: `filename`, `content_type`, `metadata_json`.
   - Optional `Idempotency-Key` header prevents duplicate jobs when clients retry upload requests.
-  - Streams upload to private temporary object storage, creates a Postgres job, returns immediately.
-  - Response: `job_id`, `status`, `status_url`, `events_url`, `result_url`.
+  - Streams upload to a private durable MinIO original object, creates one `document_library_items` row and one `document_jobs` row in a single transaction, returns immediately.
+  - Response: `library_item_id`, `job_id`, `status`, `library_url`, `status_url`, `events_url`, `result_url`.
 
 - `GET /v1/jobs/{job_id}`
   - Returns status: `queued`, `running`, `succeeded`, `failed`, `cancelled`.
@@ -87,15 +90,15 @@ Implement these endpoints:
 
 - `DELETE /v1/jobs/{job_id}`
   - Marks queued/running job cancelled when possible.
-  - Does not delete completed MinIO result unless explicit cleanup policy is later added.
+  - Does not delete the durable original file or completed MinIO results. Library deletion/retention policy owns stored objects.
 
 - `POST /v1/batches`
   - Multipart upload fields: repeated `files`.
   - Optional fields: `metadata_json`, `batch_name`.
   - Optional `Idempotency-Key` header prevents duplicate batches when clients retry upload requests.
-  - Streams every file to private temporary object storage before job creation is committed.
-  - Creates one `document_batches` row and one `document_jobs` row per file.
-  - Returns `batch_id`, aggregate status, child job IDs, `status_url`, `events_url`, and `result_url`.
+  - Streams every file to private durable MinIO original storage before job creation is committed.
+  - Creates one `document_batches` row plus one `document_library_items` row and one `document_jobs` row per file.
+  - Returns `batch_id`, aggregate status, child `library_item_id`/`job_id` pairs, `status_url`, `events_url`, and `result_url`.
 
 - `GET /v1/batches/{batch_id}`
   - Returns aggregate status and per-file job status.
@@ -113,7 +116,40 @@ Implement these endpoints:
 
 - `DELETE /v1/batches/{batch_id}`
   - Cancels queued/running child jobs.
-  - Completed child results remain available unless a future cleanup policy deletes them.
+  - Completed child originals/results remain available unless explicit library deletion or configured retention deletes them.
+
+File library endpoints:
+
+- `GET /v1/library`
+  - Paginated, sortable, filterable list of uploaded files.
+  - Filters: `status`, `detected_type`, `batch_id`, creation time range, filename query.
+  - Returns each item with `library_item_id`, current `job_id`, `filename`, `content_type`, `detected_type`, `size_bytes`, `status`, `stage`, `percent`, `created_at`, `updated_at`, and preview/result URL fields when available.
+
+- `GET /v1/library/{library_item_id}`
+  - Returns durable file metadata, current processing status, active/latest job metadata, preview metadata, Markdown result metadata, extracted asset counts, and error summary if failed.
+
+- `GET /v1/library/{library_item_id}/original`
+  - Streams the durable original upload from MinIO through the API with correct `Content-Type` and safe `Content-Disposition`.
+  - Supports `Range` requests where practical for browser PDF/video-like viewers and large file previews.
+
+- `GET /v1/library/{library_item_id}/preview`
+  - Streams or redirects to the best browser-safe preview.
+  - Uses the original object directly for browser-compatible images, PDFs, and text when safe.
+  - Uses generated preview assets for HEIC, DOC, DOCX, or any format that needs normalization.
+  - Returns `409` while preview generation is pending and `404` only when the library item does not exist.
+
+- `GET /v1/library/{library_item_id}/markdown`
+  - Returns completed Markdown metadata and supports `?include_markdown=true`.
+  - Equivalent to following the current job result, but stable for UI code keyed by library item.
+
+- `POST /v1/library/{library_item_id}/reprocess`
+  - Creates a new job from the retained original file without requiring the user to upload again.
+  - Keeps previous successful results unless explicit replacement policy is configured.
+
+- `DELETE /v1/library/{library_item_id}`
+  - Cancels queued/running work for that item.
+  - Deletes the durable original, generated previews, Markdown result, extracted assets, and related asset rows according to the configured deletion policy.
+  - Keeps event/job metadata as tombstoned audit records unless hard-delete mode is explicitly configured.
 
 CLI commands:
 
@@ -131,6 +167,72 @@ CLI commands:
 - `document-agent result JOB_ID --output out.md`
   - Fetches completed Markdown.
 
+## File Library UI
+
+Build a production web UI for the file library in addition to the API and CLI.
+
+Frontend architecture:
+
+- Use a small React + TypeScript + Vite app under `document_agent/ui` or `frontend`, built into static assets and served by FastAPI under `/app` in production.
+- The UI must use only the public API endpoints described in this plan; it must not reach into the database or MinIO directly.
+- Keep API client code typed and centralized so SSE, polling fallback, upload progress, and error handling are consistent.
+- The UI must support deployments where API auth is added later by reading an API key/token from the same future auth seam instead of hard-coding credentials.
+
+Primary screen:
+
+- First screen is the actual file library workspace, not a marketing/landing page.
+- Full viewport application layout.
+- Left column uses approximately one fourth of the screen width and contains:
+  - Upload button/drop zone supporting single and multiple mixed files.
+  - Search and filters for status/type.
+  - Uploaded file list with filename, detected type, size, status, progress, and error indicator.
+  - Batch grouping when files were uploaded together.
+- Remaining three fourths of the screen is split into two columns:
+  - Left detail column: selected file preview.
+  - Right detail column: generated Markdown result.
+- The layout must remain usable on smaller screens by collapsing to tabs or stacked panes, while preserving the same information architecture.
+
+Upload UX:
+
+- Users can drag and drop or select multiple supported files in one action.
+- Uploading files immediately creates durable library items and queues background processing jobs.
+- The list updates as each upload is accepted, queued, running, succeeded, failed, or cancelled.
+- Upload progress and processing progress are separate states; a file can finish uploading but still be queued for conversion.
+- Batch uploads preserve input order and show per-file outcomes. One failed file must not hide successful files.
+- Re-upload retries should use idempotency where available to avoid duplicate library entries after network retries.
+
+Preview UX:
+
+- The selected file preview must render all supported input types:
+  - `jpg`, `jpeg`, `png`: render original image through the original-file endpoint.
+  - `heic`: render generated browser-safe PNG/JPEG preview.
+  - `pdf`: render original PDF through the original-file endpoint when browser-compatible; fall back to generated page previews if needed.
+  - `txt`: render text preview with encoding-normalized content.
+  - `doc`, `docx`: render generated PDF or HTML preview produced from the retained original.
+- Preview assets are stored in MinIO and streamed/proxied by the API. No preview image or converted preview file is durably stored on local disk.
+- Preview pane must handle pending preview, failed preview, unsupported preview, large file, and deleted file states clearly.
+
+Markdown result UX:
+
+- Markdown pane shows queued/running state until conversion succeeds.
+- On success, fetch Markdown through `/v1/library/{library_item_id}/markdown?include_markdown=true`.
+- Render Markdown in a readable preview mode and provide a raw Markdown view/copy/download affordance.
+- Markdown image links must point to API asset URLs, not local paths or base64 payloads.
+- If processing fails, show safe error code/message and keep the original preview available for inspection/reprocess.
+
+Realtime behavior:
+
+- Use SSE for active selected item and active batches where available.
+- Fall back to polling `/v1/library` and `/v1/library/{library_item_id}` when SSE disconnects or the browser/network blocks streaming.
+- SSE disconnects must not cancel processing.
+- UI state must reconcile from durable API state after page refresh.
+
+Deletion and reprocessing UX:
+
+- Delete action removes the library item and all configured stored objects through the API, after user confirmation.
+- Cancel action cancels queued/running conversion without deleting the durable original.
+- Reprocess action creates a new job from the retained original file and updates the library item with latest job status.
+
 ## Batch Processing
 
 Batch processing is part of v1, not a future feature.
@@ -138,7 +240,7 @@ Batch processing is part of v1, not a future feature.
 Behavior:
 
 - A batch is a grouping and aggregation primitive; actual conversion work still happens per file.
-- Every input file receives its own `job_id`, temp directory, retry state, result Markdown asset, and extracted asset set.
+- Every input file receives its own `library_item_id`, `job_id`, temp directory, retry state, durable original object, result Markdown asset, generated preview assets, and extracted asset set.
 - Workers claim child jobs independently, so mixed file types can process in parallel up to configured worker capacity.
 - Batch progress is computed from child jobs, weighted equally per file in v1.
 - Batch terminal status:
@@ -148,7 +250,7 @@ Behavior:
   - `cancelled`: cancellation was requested before any child succeeded.
 - Batch result shape must always include every submitted file, preserving input order.
 - Batch ZIP output is optional and generated only when requested or explicitly configured.
-- Batch creation is failure-safe: if staging any file fails, delete already staged objects and do not commit a partially created batch.
+- Batch creation is failure-safe: if durable original storage for any file fails, delete already stored original objects and do not commit a partially created batch.
 - If a retry uses the same `Idempotency-Key`, return the original batch instead of creating duplicate child jobs.
 
 Batch output manifest:
@@ -158,7 +260,9 @@ Batch output manifest:
 - `total_files`, `succeeded_count`, `failed_count`, `cancelled_count`
 - Per file:
   - `input_index`, `filename`, `job_id`, `status`
+  - `library_item_id`
   - `markdown_url` when succeeded
+  - `preview_url` when available
   - `asset_count`
   - `error_code`, `error_message` when failed
 
@@ -190,22 +294,34 @@ Use Postgres tables:
   - `created_at`, `started_at`, `finished_at`, `cancelled_at`
   - `metadata_json`
 
+- `document_library_items`
+  - `id`, `batch_id`, `current_job_id`, `input_index`
+  - `original_filename`, `display_filename`, `content_type`, `detected_type`, `sha256`, `size_bytes`
+  - `status`, `stage`, `percent`
+  - `original_asset_id`, `preview_asset_id`, `thumbnail_asset_id`, `latest_markdown_asset_id`
+  - `created_at`, `updated_at`, `uploaded_at`, `processed_at`, `deleted_at`
+  - `error_code`, `error_message`, `error_details_json`
+  - `metadata_json`
+  - Purpose: durable file-library row that survives individual job retries/reprocessing and owns the retained original upload.
+
 - `document_jobs`
-  - `id`, `batch_id`, `input_index`, `idempotency_key`, `status`, `filename`, `content_type`, `detected_type`, `sha256`, `size_bytes`
-  - `source_bucket`, `source_object_key`, `source_deleted_at`
+  - `id`, `library_item_id`, `batch_id`, `input_index`, `idempotency_key`, `status`, `filename`, `content_type`, `detected_type`, `sha256`, `size_bytes`
+  - `source_asset_id`
   - `stage`, `percent`, `attempt_count`, `max_attempts`
   - `created_at`, `started_at`, `finished_at`, `cancelled_at`
   - `result_markdown_asset_id`
   - `error_code`, `error_message`, `error_details_json`
+  - Purpose: one processing attempt stream for a library item. Reprocessing creates a new job and updates `document_library_items.current_job_id`.
 
 - `document_assets`
-  - `id`, `batch_id`, `job_id`, `role`
-  - Roles: `markdown_result`, `embedded_image`, `equation_image`, `diagnostic_manifest`, `batch_manifest`, `batch_archive`
+  - `id`, `library_item_id`, `batch_id`, `job_id`, `role`
+  - Roles: `original_file`, `markdown_result`, `embedded_image`, `equation_image`, `preview_pdf`, `preview_image`, `preview_text`, `thumbnail`, `diagnostic_manifest`, `batch_manifest`, `batch_archive`
   - `bucket`, `object_key`, `mime_type`, `size_bytes`, `sha256`
   - `public_url`, `created_at`
+  - Original files use role `original_file` and are private by default; access is through library API endpoints.
 
 - `job_events`
-  - `id`, `batch_id`, `job_id`, `event_type`, `stage`, `percent`, `message`, `payload_json`, `created_at`
+  - `id`, `library_item_id`, `batch_id`, `job_id`, `event_type`, `stage`, `percent`, `message`, `payload_json`, `created_at`
 
 Worker leasing:
 
@@ -248,7 +364,8 @@ Image input strategy:
 - Normalize orientation using EXIF.
 - Convert image bytes to PNG in a temp working area.
 - Send to existing VLM OCR adapter.
-- Output Markdown contains OCR text only unless the model emits figure placeholders; for source image documents, do not persist the source image.
+- Output Markdown contains OCR text only unless the model emits figure placeholders.
+- Source image originals are retained as durable `original_file` assets for library preview/reprocessing, but they are not re-added to Markdown as embedded document assets.
 
 Office strategy:
 
@@ -257,9 +374,18 @@ Office strategy:
 - Embedded media extracted by Pandoc/LibreOffice must be uploaded to MinIO and removed from local temp storage.
 - Tables should be emitted inline as Markdown/HTML tables, not image links, unless they are embedded screenshots.
 
+Preview generation strategy:
+
+- Generate previews from the retained original file independently from Markdown conversion when the original is not browser-safe.
+- Use original files directly for browser-safe preview types where possible: PDF, JPEG, PNG, and normalized text.
+- Generate PNG/JPEG previews for HEIC.
+- Generate PDF or HTML previews for DOC/DOCX through LibreOffice/Pandoc.
+- Store preview artifacts in MinIO with roles `preview_pdf`, `preview_image`, `preview_text`, or `thumbnail`.
+- Preview generation failures must not automatically fail Markdown conversion, and Markdown conversion failures must not remove the original file preview.
+
 Markdown output rules:
 
-- Include YAML frontmatter with job ID, source filename, detected type, generated timestamp, converter version, and asset count.
+- Include YAML frontmatter with library item ID, job ID, source filename, detected type, generated timestamp, converter version, and asset count.
 - Use stable headings and page markers for multi-page documents.
 - Use Markdown image syntax for assets: `![alt text](https://.../v1/assets/{asset_id})`.
 - Do not embed base64 images.
@@ -271,6 +397,11 @@ Markdown output rules:
 
 MinIO object keys:
 
+- `library/{library_item_id}/original/{safe_filename}`
+- `library/{library_item_id}/previews/preview.pdf`
+- `library/{library_item_id}/previews/preview.html`
+- `library/{library_item_id}/previews/page-{page_number}.png`
+- `library/{library_item_id}/previews/thumbnail.png`
 - `jobs/{job_id}/result/document.md`
 - `jobs/{job_id}/assets/images/{asset_id}.{ext}`
 - `jobs/{job_id}/assets/equations/{asset_id}.{ext}`
@@ -283,20 +414,30 @@ Local storage:
 - Use per-job temp directory.
 - Delete temp directory in `finally` after success/failure.
 - Never store extracted images outside temp.
-- No original upload retention by default.
+- Never store original uploads durably on local disk.
+- Local temp copies of originals, previews, converted intermediates, and extracted assets must be deleted after the operation finishes.
 
-Temporary source staging:
+Durable source storage:
 
-- API uploads source files to private staging keys so separate worker containers can process them after the request returns.
-- Staging keys use `staging/jobs/{job_id}/source/{safe_filename}`.
-- Workers download the source into a per-job temp directory, process it, then delete the staging object after terminal success/failure/cancellation.
-- A cleanup task deletes orphaned staging objects older than the configured TTL.
-- Source image inputs are staging-only; they are not exposed as assets and are not retained as durable outputs.
+- API uploads source files to private durable MinIO keys under `library/{library_item_id}/original/`.
+- Each original upload creates a `document_assets` row with role `original_file` and is referenced by `document_library_items.original_asset_id` and `document_jobs.source_asset_id`.
+- Workers download the retained original into a per-job temp directory, process it, and delete only the local temp copy.
+- Original objects remain available for preview, download, and reprocessing after conversion completes.
+- Source image inputs are exposed only through library original/preview endpoints; they are not treated as extracted image assets and are not inserted into Markdown unless they are explicitly part of another document.
+- Cleanup tasks reconcile orphaned uploaded originals that were stored but never committed to a library item because an upload transaction failed.
+
+Deletion and retention:
+
+- Default policy retains original uploads, generated previews, Markdown results, extracted assets, manifests, and batch archives until explicit deletion.
+- `DELETE /v1/library/{library_item_id}` deletes the durable original and all item-scoped generated objects according to configured policy.
+- Completed-result retention may delete Markdown/results/previews/extracted assets after a configured TTL, but must not delete original uploads unless original retention is explicitly enabled.
+- Original-retention policy is opt-in and must be configured separately from result retention.
 
 HTTP asset URLs:
 
 - Default Markdown URL form: `{PUBLIC_BASE_URL}/v1/assets/{asset_id}`.
 - API proxies MinIO object bytes with correct `Content-Type`.
+- Original and preview files use library endpoints, not Markdown asset URLs, unless they are extracted document assets that belong in Markdown.
 - Later auth can be added at route/middleware level.
 
 ## Reliability
@@ -324,7 +465,7 @@ Retries:
 Timeout handling:
 
 - FastAPI never processes documents in request handlers.
-- Upload request only stages the source object and creates job metadata.
+- Upload request only stores the durable original object, creates library/job metadata, and returns.
 - SSE is informational; disconnecting does not affect processing.
 - Result retrieval is independent from SSE.
 
@@ -341,9 +482,10 @@ Resource controls:
 
 Cleanup controls:
 
-- Configurable staging-object TTL.
+- Configurable orphaned-upload TTL for objects stored before a transaction failed or before DB metadata was committed.
 - Configurable completed-result retention policy, default retain until explicit deletion.
-- Startup or scheduled cleanup reconciles terminal jobs with undeleted staging objects.
+- Configurable original-file retention policy, default retain until explicit library deletion.
+- Startup or scheduled cleanup reconciles object storage with library/assets metadata and removes only confirmed orphaned objects.
 
 Observability:
 
@@ -371,11 +513,13 @@ Unit tests:
 - Markdown URL rewriting: no local paths, no base64 images.
 - MinIO storage client with mocked MinIO.
 - Job state transitions and retry classification.
-- Temporary source staging upload, worker download, and cleanup.
+- Durable original upload asset creation, worker download from original asset, and orphaned-upload cleanup.
+- Library item status updates across upload, queue, running, success, failure, cancel, delete, and reprocess.
+- Preview routing for browser-safe originals versus generated preview assets.
 - Batch status aggregation and per-file manifest generation.
 - Batch filename collision handling.
 - Idempotent job/batch create requests.
-- Cleanup when batch staging partially fails.
+- Cleanup when batch durable-original storage partially fails.
 - Worker leasing and expired lease recovery.
 - Image normalization including HEIC fixture if available.
 - TXT conversion with encoding detection.
@@ -385,17 +529,26 @@ Integration tests:
 
 - FastAPI upload returns job immediately.
 - FastAPI batch upload returns batch ID and child job IDs immediately.
-- Worker can process a job from a staged source object after the API request has ended.
+- Worker can process a job from a retained original object after the API request has ended.
+- Library list endpoint shows uploaded items and current statuses.
+- Library detail endpoint returns original, preview, current job, and Markdown result metadata.
+- Original endpoint streams durable uploaded files with correct `Content-Type`.
+- Preview endpoint streams original-compatible files and generated preview assets for HEIC/DOC/DOCX.
 - Worker processes a TXT file to Markdown.
 - Worker processes an image file through mocked OCR.
 - Worker processes a PDF through a small fixture and uploads assets.
 - Result endpoint returns Markdown URL and inline Markdown.
+- Library Markdown endpoint returns the latest successful Markdown for the selected item.
+- Reprocess endpoint creates a new job from the retained original without another upload.
+- Library delete endpoint removes/cancels the item and deletes configured MinIO objects.
 - Batch result returns one Markdown URL per successful file and one error per failed file.
 - Batch archive contains all successful Markdown files and `manifest.json`.
 - Asset endpoint streams MinIO object.
 - SSE emits queued/running/succeeded events.
 - Batch SSE emits child job progress and aggregate progress.
 - Temp directory is deleted after success and failure.
+- UI upload flow creates library items, queues background processing, updates the left file list, renders file preview, and renders Markdown result.
+- UI recovers current library/job state after browser refresh.
 
 Container tests:
 
@@ -407,15 +560,19 @@ Container tests:
 Acceptance scenarios:
 
 - Upload `.txt`, get Markdown result with no asset links.
-- Upload `.png`, OCR result is Markdown, source image is not persisted.
+- Upload `.png`, original image is retained as a private library original for preview/reprocess, OCR result is Markdown, and Markdown does not embed the source image unless the OCR output explicitly describes content.
 - Upload `.heic`, service normalizes and OCRs it.
 - Upload `.pdf` with figures, extracted figures are in MinIO and Markdown contains HTTP asset URLs.
 - Upload `.docx` with embedded image, image is in MinIO and Markdown contains HTTP asset URL.
 - Upload a mixed batch of `.pdf`, `.docx`, `.png`, `.heic`, and `.txt`; each successful file produces its own Markdown result.
+- Upload multiple mixed files through the UI; every file appears in the library list, gets queued independently, and shows its own preview and Markdown output.
+- Select each supported file type in the UI and see a browser-safe preview backed by MinIO original/preview assets.
 - Upload a batch where one file is unsupported; supported files still complete and the batch status becomes `partial_failed`.
 - Upload unsupported file, job fails with `UNSUPPORTED_FILE_TYPE`.
 - Disconnect SSE during processing, job still completes and result is retrievable.
 - Kill worker mid-job, another worker retries after lease expiry.
+- Reprocess an existing library item without re-uploading the original.
+- Delete a library item and verify original, preview, Markdown, and extracted assets are removed according to policy while local disk remains clean.
 
 ## Assumptions
 
@@ -424,8 +581,9 @@ Acceptance scenarios:
 - MinIO is required for production deployments.
 - Postgres is required for production job metadata and worker leases.
 - Redis is intentionally deferred.
-- Original uploaded files are temporary and deleted after conversion.
-- Source files may exist briefly as private staging objects so async workers can process them; they are not durable retained originals.
+- Original uploaded files are durable private MinIO objects owned by file-library items.
+- Source files are retained after conversion for preview and reprocessing unless explicit library deletion or configured original-retention policy removes them.
+- Durable original storage does not change the rule that local temp copies are deleted after processing.
 - Extracted image assets are stored only in MinIO, never durably on local disk.
 - Existing Instructor Assistant code will be extracted and refactored, not imported from the app repo at runtime.
 - OCR uses an external OpenAI-compatible VLM endpoint by config; deterministic converters handle non-OCR text/Office paths where possible.

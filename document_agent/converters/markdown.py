@@ -8,6 +8,7 @@ from uuid import UUID
 def frontmatter(
     *,
     job_id: UUID,
+    library_item_id: Optional[UUID] = None,
     batch_id: Optional[UUID],
     filename: str,
     detected_type: str,
@@ -18,6 +19,8 @@ def frontmatter(
         "---",
         f"job_id: {job_id}",
     ]
+    if library_item_id:
+        lines.append(f"library_item_id: {library_item_id}")
     if batch_id:
         lines.append(f"batch_id: {batch_id}")
     lines.extend(

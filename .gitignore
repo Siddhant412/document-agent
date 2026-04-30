@@ -11,3 +11,5 @@ build/
 markdown_outputs/
 docker-compose.override.yml
 test_data/*
+node_modules/
+*.tsbuildinfo

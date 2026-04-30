@@ -19,6 +19,18 @@ class Repository:
         self.settings = settings or get_settings()
         self.pool = get_pool(self.settings)
 
+    def _library_original_url(self, library_item_id: UUID) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/original"
+
+    def _library_preview_url(self, library_item_id: UUID) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/preview"
+
+    def _library_markdown_url(self, library_item_id: UUID) -> str:
+        return f"{self.settings.public_base_url.rstrip('/')}/v1/library/{library_item_id}/markdown"
+
+    def _initial_preview_status(self, detected_type: str) -> str:
+        return "not_required" if detected_type in {"jpg", "jpeg", "png", "pdf", "txt"} else "pending"
+
     def get_job_by_idempotency_key(self, idempotency_key: str) -> Optional[Dict[str, Any]]:
         with self.pool.connection() as conn:
             row = conn.execute(
@@ -42,6 +54,7 @@ class Repository:
     def create_job(
         self,
         *,
+        library_item_id: Optional[UUID] = None,
         job_id: UUID,
         filename: str,
         content_type: Optional[str],
@@ -53,18 +66,38 @@ class Repository:
         idempotency_key: Optional[str],
         metadata: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
+        library_item_id = library_item_id or uuid4()
         with self.pool.connection() as conn:
             with conn.transaction():
-                row = conn.execute(
+                conn.execute(
+                    """
+                    INSERT INTO document_library_items(
+                      id, original_filename, display_filename, content_type, detected_type,
+                      sha256, size_bytes, status, stage, percent, preview_status, metadata_json
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,'queued','queued',0,%s,%s::jsonb)
+                    """,
+                    (
+                        str(library_item_id),
+                        filename,
+                        filename,
+                        content_type,
+                        detected_type,
+                        sha256,
+                        int(size_bytes),
+                        self._initial_preview_status(detected_type),
+                        _json_payload(metadata),
+                    ),
+                )
+                conn.execute(
                     """
                     INSERT INTO document_jobs(
-                      id, idempotency_key, filename, content_type, detected_type, sha256,
+                      id, library_item_id, idempotency_key, filename, content_type, detected_type, sha256,
                       size_bytes, source_bucket, source_object_key, max_attempts, metadata_json
-                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
-                    RETURNING *
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                     """,
                     (
                         str(job_id),
+                        str(library_item_id),
                         idempotency_key,
                         filename,
                         content_type,
@@ -76,9 +109,48 @@ class Repository:
                         self.settings.job_max_attempts,
                         _json_payload(metadata),
                     ),
+                )
+                original_asset_id = uuid4()
+                conn.execute(
+                    """
+                    INSERT INTO document_assets(
+                      id, library_item_id, job_id, role, bucket, object_key, mime_type,
+                      size_bytes, sha256, public_url, metadata_json
+                    ) VALUES(%s,%s,%s,'original_file',%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    """,
+                    (
+                        str(original_asset_id),
+                        str(library_item_id),
+                        str(job_id),
+                        source_bucket,
+                        source_object_key,
+                        content_type or "application/octet-stream",
+                        int(size_bytes),
+                        sha256,
+                        self._library_original_url(library_item_id),
+                        _json_payload({"filename": filename}),
+                    ),
+                )
+                row = conn.execute(
+                    """
+                    UPDATE document_jobs
+                    SET source_asset_id = %s
+                    WHERE id = %s
+                    RETURNING *
+                    """,
+                    (str(original_asset_id), str(job_id)),
                 ).fetchone()
+                conn.execute(
+                    """
+                    UPDATE document_library_items
+                    SET current_job_id = %s, original_asset_id = %s, updated_at = now()
+                    WHERE id = %s
+                    """,
+                    (str(job_id), str(original_asset_id), str(library_item_id)),
+                )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=library_item_id,
                     batch_id=None,
                     job_id=job_id,
                     event_type="queued",
@@ -115,16 +187,40 @@ class Repository:
                     ),
                 ).fetchone()
                 for item in jobs:
+                    library_item_id = item.get("library_item_id") or uuid4()
+                    conn.execute(
+                        """
+                        INSERT INTO document_library_items(
+                          id, batch_id, input_index, original_filename, display_filename,
+                          content_type, detected_type, sha256, size_bytes, status, stage,
+                          percent, preview_status, metadata_json
+                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,'queued','queued',0,%s,%s::jsonb)
+                        """,
+                        (
+                            str(library_item_id),
+                            str(batch_id),
+                            int(item["input_index"]),
+                            item["filename"],
+                            item["filename"],
+                            item.get("content_type"),
+                            item["detected_type"],
+                            item["sha256"],
+                            int(item["size_bytes"]),
+                            self._initial_preview_status(item["detected_type"]),
+                            _json_payload(item.get("metadata")),
+                        ),
+                    )
                     conn.execute(
                         """
                         INSERT INTO document_jobs(
-                          id, batch_id, input_index, filename, content_type, detected_type,
-                          sha256, size_bytes, source_bucket, source_object_key, max_attempts,
-                          metadata_json
-                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                          id, library_item_id, batch_id, input_index, filename, content_type,
+                          detected_type, sha256, size_bytes, source_bucket, source_object_key,
+                          max_attempts, metadata_json
+                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                         """,
                         (
                             str(item["job_id"]),
+                            str(library_item_id),
                             str(batch_id),
                             int(item["input_index"]),
                             item["filename"],
@@ -138,8 +234,47 @@ class Repository:
                             _json_payload(item.get("metadata")),
                         ),
                     )
+                    original_asset_id = uuid4()
+                    conn.execute(
+                        """
+                        INSERT INTO document_assets(
+                          id, library_item_id, batch_id, job_id, role, bucket, object_key,
+                          mime_type, size_bytes, sha256, public_url, metadata_json
+                        ) VALUES(%s,%s,%s,%s,'original_file',%s,%s,%s,%s,%s,%s,%s::jsonb)
+                        """,
+                        (
+                            str(original_asset_id),
+                            str(library_item_id),
+                            str(batch_id),
+                            str(item["job_id"]),
+                            item["source_bucket"],
+                            item["source_object_key"],
+                            item.get("content_type") or "application/octet-stream",
+                            int(item["size_bytes"]),
+                            item["sha256"],
+                            self._library_original_url(library_item_id),
+                            _json_payload({"filename": item["filename"]}),
+                        ),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE document_jobs
+                        SET source_asset_id = %s
+                        WHERE id = %s
+                        """,
+                        (str(original_asset_id), str(item["job_id"])),
+                    )
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET current_job_id = %s, original_asset_id = %s, updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (str(item["job_id"]), str(original_asset_id), str(library_item_id)),
+                    )
                     self.add_event_in_conn(
                         conn,
+                        library_item_id=library_item_id,
                         batch_id=batch_id,
                         job_id=item["job_id"],
                         event_type="queued",
@@ -150,6 +285,7 @@ class Repository:
                     )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=None,
                     batch_id=batch_id,
                     job_id=None,
                     event_type="queued",
@@ -169,6 +305,215 @@ class Repository:
         with self.pool.connection() as conn:
             row = conn.execute("SELECT * FROM document_batches WHERE id = %s", (str(batch_id),)).fetchone()
             return dict(row) if row else None
+
+    def list_library_items(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status_filter: Optional[str] = None,
+        detected_type: Optional[str] = None,
+        batch_id: Optional[UUID] = None,
+        query: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        clauses = ["deleted_at IS NULL"]
+        params: List[Any] = []
+        if status_filter:
+            clauses.append("status = %s")
+            params.append(status_filter)
+        if detected_type:
+            clauses.append("detected_type = %s")
+            params.append(detected_type)
+        if batch_id:
+            clauses.append("batch_id = %s")
+            params.append(str(batch_id))
+        if query:
+            clauses.append("display_filename ILIKE %s")
+            params.append(f"%{query}%")
+        params.extend([int(limit), int(offset)])
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT *
+                FROM document_library_items
+                WHERE {' AND '.join(clauses)}
+                ORDER BY created_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                tuple(params),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def get_library_item(self, library_item_id: UUID) -> Optional[Dict[str, Any]]:
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT *
+                FROM document_library_items
+                WHERE id = %s AND deleted_at IS NULL
+                """,
+                (str(library_item_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_library_item_by_job(self, job_id: UUID) -> Optional[Dict[str, Any]]:
+        with self.pool.connection() as conn:
+            row = conn.execute(
+                """
+                SELECT li.*
+                FROM document_library_items AS li
+                JOIN document_jobs AS j ON j.library_item_id = li.id
+                WHERE j.id = %s AND li.deleted_at IS NULL
+                """,
+                (str(job_id),),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def list_library_assets(self, library_item_id: UUID) -> List[Dict[str, Any]]:
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT *
+                FROM document_assets
+                WHERE library_item_id = %s
+                ORDER BY created_at ASC
+                """,
+                (str(library_item_id),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def mark_library_preview_failed(self, *, library_item_id: UUID, message: str) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(
+                """
+                UPDATE document_library_items
+                SET preview_status = 'failed',
+                    updated_at = now(),
+                    metadata_json = metadata_json || jsonb_build_object('preview_error', %s)
+                WHERE id = %s
+                """,
+                (message, str(library_item_id)),
+            )
+            conn.commit()
+
+    def delete_library_item_records(self, library_item_id: UUID) -> int:
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE document_jobs
+                    SET status = CASE WHEN status IN ('queued', 'running') THEN 'cancelled' ELSE status END,
+                        stage = CASE WHEN status IN ('queued', 'running') THEN 'cancelled' ELSE stage END,
+                        cancelled_at = CASE
+                          WHEN status IN ('queued', 'running') THEN COALESCE(cancelled_at, now())
+                          ELSE cancelled_at
+                        END,
+                        finished_at = CASE
+                          WHEN status IN ('queued', 'running') THEN COALESCE(finished_at, now())
+                          ELSE finished_at
+                        END,
+                        lease_owner = NULL,
+                        lease_expires_at = NULL,
+                        result_markdown_asset_id = NULL
+                    WHERE library_item_id = %s
+                    """,
+                    (str(library_item_id),),
+                )
+                conn.execute(
+                    """
+                    UPDATE document_library_items
+                    SET deleted_at = COALESCE(deleted_at, now()),
+                        status = 'deleted',
+                        stage = 'deleted',
+                        updated_at = now(),
+                        original_asset_id = NULL,
+                        preview_asset_id = NULL,
+                        thumbnail_asset_id = NULL,
+                        latest_markdown_asset_id = NULL
+                    WHERE id = %s
+                    """,
+                    (str(library_item_id),),
+                )
+                rows = conn.execute(
+                    "DELETE FROM document_assets WHERE library_item_id = %s RETURNING id",
+                    (str(library_item_id),),
+                ).fetchall()
+                return len(rows)
+
+    def create_reprocess_job(self, library_item_id: UUID) -> Optional[Dict[str, Any]]:
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                item = conn.execute(
+                    """
+                    SELECT *
+                    FROM document_library_items
+                    WHERE id = %s AND deleted_at IS NULL
+                    FOR UPDATE
+                    """,
+                    (str(library_item_id),),
+                ).fetchone()
+                if not item:
+                    return None
+                original = conn.execute(
+                    "SELECT * FROM document_assets WHERE id = %s",
+                    (str(item["original_asset_id"]),),
+                ).fetchone()
+                if not original:
+                    return None
+                job_id = uuid4()
+                row = conn.execute(
+                    """
+                    INSERT INTO document_jobs(
+                      id, library_item_id, batch_id, input_index, filename, content_type,
+                      detected_type, sha256, size_bytes, source_bucket, source_object_key,
+                      source_asset_id, max_attempts, metadata_json
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                    RETURNING *
+                    """,
+                    (
+                        str(job_id),
+                        str(library_item_id),
+                        str(item["batch_id"]) if item.get("batch_id") else None,
+                        item.get("input_index"),
+                        item["display_filename"],
+                        item.get("content_type"),
+                        item.get("detected_type"),
+                        item["sha256"],
+                        int(item["size_bytes"]),
+                        original["bucket"],
+                        original["object_key"],
+                        str(original["id"]),
+                        self.settings.job_max_attempts,
+                        _json_payload(item.get("metadata_json")),
+                    ),
+                ).fetchone()
+                conn.execute(
+                    """
+                    UPDATE document_library_items
+                    SET current_job_id = %s,
+                        status = 'queued',
+                        stage = 'queued',
+                        percent = 0,
+                        processed_at = NULL,
+                        updated_at = now(),
+                        error_code = NULL,
+                        error_message = NULL,
+                        error_details_json = '{}'::jsonb
+                    WHERE id = %s
+                    """,
+                    (str(job_id), str(library_item_id)),
+                )
+                self.add_event_in_conn(
+                    conn,
+                    library_item_id=library_item_id,
+                    batch_id=item.get("batch_id"),
+                    job_id=job_id,
+                    event_type="queued",
+                    stage="queued",
+                    percent=0,
+                    message="Library item queued for reprocessing.",
+                )
+                return dict(row)
 
     def list_batch_jobs(self, batch_id: UUID) -> List[Dict[str, Any]]:
         with self.pool.connection() as conn:
@@ -190,6 +535,46 @@ class Repository:
                 LIMIT %s
                 """,
                 (int(limit),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def list_expired_completed_assets(
+        self,
+        *,
+        retention_seconds: int,
+        limit: int = 500,
+    ) -> List[Dict[str, Any]]:
+        if retention_seconds <= 0:
+            return []
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT a.*
+                FROM document_assets AS a
+                LEFT JOIN document_jobs AS j ON j.id = a.job_id
+                LEFT JOIN document_batches AS b ON b.id = a.batch_id
+                WHERE a.role IN (
+                    'markdown_result',
+                    'embedded_image',
+                    'equation_image',
+                    'preview_pdf',
+                    'preview_image',
+                    'preview_text',
+                    'thumbnail',
+                    'diagnostic_manifest',
+                    'batch_manifest',
+                    'batch_archive'
+                )
+                  AND COALESCE(j.finished_at, b.finished_at, a.created_at)
+                    < now() - (%s || ' seconds')::interval
+                  AND (
+                    j.status IN ('succeeded', 'failed', 'cancelled')
+                    OR b.status IN ('succeeded', 'partial_failed', 'failed', 'cancelled')
+                  )
+                ORDER BY a.created_at ASC
+                LIMIT %s
+                """,
+                (int(retention_seconds), int(limit)),
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -255,8 +640,21 @@ class Repository:
                         """,
                         (str(job["batch_id"]),),
                     )
+                if job.get("library_item_id"):
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET status = 'running',
+                            stage = 'starting',
+                            percent = GREATEST(percent, 1),
+                            updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (str(job["library_item_id"]),),
+                    )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=job.get("library_item_id"),
                     batch_id=job.get("batch_id"),
                     job_id=job["id"],
                     event_type="started",
@@ -315,8 +713,27 @@ class Repository:
                 ).fetchall()
                 jobs = [dict(row) for row in rows]
                 for job in jobs:
+                    if job.get("library_item_id"):
+                        conn.execute(
+                            """
+                            UPDATE document_library_items
+                            SET status = 'failed',
+                                stage = 'failed',
+                                percent = document_jobs.percent,
+                                processed_at = now(),
+                                updated_at = now(),
+                                error_code = 'JOB_TIMEOUT',
+                                error_message = 'Job exceeded configured processing timeout.',
+                                error_details_json = jsonb_build_object('timeout_seconds', %s)
+                            FROM document_jobs
+                            WHERE document_library_items.id = %s
+                              AND document_jobs.id = %s
+                            """,
+                            (int(timeout_seconds), str(job["library_item_id"]), str(job["id"])),
+                        )
                     self.add_event_in_conn(
                         conn,
+                        library_item_id=job.get("library_item_id"),
                         batch_id=job.get("batch_id"),
                         job_id=job["id"],
                         event_type="failed",
@@ -369,8 +786,27 @@ class Repository:
                         (str(batch_id),),
                     ).fetchall()
                     for job in cancelled_jobs:
+                        if job.get("library_item_id"):
+                            conn.execute(
+                                """
+                                UPDATE document_library_items
+                                SET status = 'cancelled',
+                                    stage = 'cancelled',
+                                    percent = %s,
+                                    processed_at = now(),
+                                    updated_at = now(),
+                                    error_code = COALESCE(error_code, 'BATCH_TIMEOUT'),
+                                    error_message = COALESCE(
+                                      error_message,
+                                      'Batch exceeded configured wall-clock timeout.'
+                                    )
+                                WHERE id = %s
+                                """,
+                                (int(job.get("percent") or 0), str(job["library_item_id"])),
+                            )
                         self.add_event_in_conn(
                             conn,
+                            library_item_id=job.get("library_item_id"),
                             batch_id=batch_id,
                             job_id=job["id"],
                             event_type="failed",
@@ -381,6 +817,7 @@ class Repository:
                         )
                     self.add_event_in_conn(
                         conn,
+                        library_item_id=None,
                         batch_id=batch_id,
                         job_id=None,
                         event_type="failed",
@@ -409,14 +846,26 @@ class Repository:
                     UPDATE document_jobs
                     SET stage = %s, percent = %s
                     WHERE id = %s
-                    RETURNING batch_id
+                    RETURNING batch_id, library_item_id
                     """,
                     (stage, percent, str(job_id)),
                 ).fetchone()
                 if not job:
                     return
+                if job.get("library_item_id"):
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET stage = %s, percent = %s, updated_at = now()
+                        WHERE id = %s
+                          AND current_job_id = %s
+                          AND status IN ('queued', 'running')
+                        """,
+                        (stage, percent, str(job["library_item_id"]), str(job_id)),
+                    )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=job.get("library_item_id"),
                     batch_id=job.get("batch_id"),
                     job_id=job_id,
                     event_type="progress",
@@ -430,6 +879,7 @@ class Repository:
         self,
         *,
         asset_id: Optional[UUID] = None,
+        library_item_id: Optional[UUID] = None,
         batch_id: Optional[UUID],
         job_id: Optional[UUID],
         role: str,
@@ -446,13 +896,14 @@ class Repository:
                 row = conn.execute(
                     """
                     INSERT INTO document_assets(
-                      id, batch_id, job_id, role, bucket, object_key, mime_type, size_bytes,
-                      sha256, public_url, metadata_json
-                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
+                      id, library_item_id, batch_id, job_id, role, bucket, object_key, mime_type,
+                      size_bytes, sha256, public_url, metadata_json
+                    ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
                     RETURNING *
                     """,
                     (
                         str(asset_id or uuid4()),
+                        str(library_item_id) if library_item_id else None,
                         str(batch_id) if batch_id else None,
                         str(job_id) if job_id else None,
                         role,
@@ -466,9 +917,37 @@ class Repository:
                     ),
                 ).fetchone()
                 ASSETS_UPLOADED.labels(role=role).inc()
+                if library_item_id and role in {"preview_pdf", "preview_image", "preview_text"}:
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET preview_asset_id = %s, preview_status = 'succeeded', updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (str(row["id"]), str(library_item_id)),
+                    )
+                if library_item_id and role == "thumbnail":
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET thumbnail_asset_id = %s, updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (str(row["id"]), str(library_item_id)),
+                    )
+                if library_item_id and role == "markdown_result":
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET latest_markdown_asset_id = %s, updated_at = now()
+                        WHERE id = %s
+                        """,
+                        (str(row["id"]), str(library_item_id)),
+                    )
                 if batch_id or job_id:
                     self.add_event_in_conn(
                         conn,
+                        library_item_id=library_item_id,
                         batch_id=batch_id,
                         job_id=job_id,
                         event_type="asset_uploaded",
@@ -521,8 +1000,27 @@ class Repository:
                 ).fetchone()
                 if not job:
                     return False
+                if job.get("library_item_id"):
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET status = 'succeeded',
+                            stage = 'succeeded',
+                            percent = 100,
+                            latest_markdown_asset_id = %s,
+                            processed_at = now(),
+                            updated_at = now(),
+                            error_code = NULL,
+                            error_message = NULL,
+                            error_details_json = '{}'::jsonb
+                        WHERE id = %s
+                          AND current_job_id = %s
+                        """,
+                        (str(markdown_asset_id), str(job["library_item_id"]), str(job_id)),
+                    )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=job.get("library_item_id"),
                     batch_id=job.get("batch_id"),
                     job_id=job_id,
                     event_type="succeeded",
@@ -561,8 +1059,31 @@ class Repository:
                         """,
                         (code, message, _json_payload(details), str(job_id)),
                     ).fetchone()
+                    if job.get("library_item_id"):
+                        conn.execute(
+                            """
+                            UPDATE document_library_items
+                            SET status = 'queued',
+                                stage = 'retry_queued',
+                                percent = 0,
+                                updated_at = now(),
+                                error_code = %s,
+                                error_message = %s,
+                                error_details_json = %s::jsonb
+                            WHERE id = %s
+                              AND current_job_id = %s
+                            """,
+                            (
+                                code,
+                                message,
+                                _json_payload(details),
+                                str(job["library_item_id"]),
+                                str(job_id),
+                            ),
+                        )
                     self.add_event_in_conn(
                         conn,
+                        library_item_id=job.get("library_item_id"),
                         batch_id=job.get("batch_id"),
                         job_id=job_id,
                         event_type="progress",
@@ -583,8 +1104,31 @@ class Repository:
                     """,
                     (code, message, _json_payload(details), str(job_id)),
                 ).fetchone()
+                if job.get("library_item_id"):
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET status = 'failed',
+                            stage = 'failed',
+                            processed_at = now(),
+                            updated_at = now(),
+                            error_code = %s,
+                            error_message = %s,
+                            error_details_json = %s::jsonb
+                        WHERE id = %s
+                          AND current_job_id = %s
+                        """,
+                        (
+                            code,
+                            message,
+                            _json_payload(details),
+                            str(job["library_item_id"]),
+                            str(job_id),
+                        ),
+                    )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=job.get("library_item_id"),
                     batch_id=job.get("batch_id"),
                     job_id=job_id,
                     event_type="failed",
@@ -619,8 +1163,23 @@ class Repository:
                 ).fetchone()
                 if not job:
                     return None
+                if job.get("library_item_id"):
+                    conn.execute(
+                        """
+                        UPDATE document_library_items
+                        SET status = 'cancelled',
+                            stage = 'cancelled',
+                            percent = %s,
+                            processed_at = now(),
+                            updated_at = now()
+                        WHERE id = %s
+                          AND current_job_id = %s
+                        """,
+                        (int(job.get("percent") or 0), str(job["library_item_id"]), str(job_id)),
+                    )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=job.get("library_item_id"),
                     batch_id=job.get("batch_id"),
                     job_id=job_id,
                     event_type="failed",
@@ -645,18 +1204,39 @@ class Repository:
                 ).fetchone()
                 if not batch:
                     return None
-                conn.execute(
+                cancelled_jobs = conn.execute(
                     """
                     UPDATE document_jobs
                     SET status = 'cancelled', stage = 'cancelled', cancelled_at = now(),
                         finished_at = COALESCE(finished_at, now()),
                         lease_owner = NULL, lease_expires_at = NULL
                     WHERE batch_id = %s AND status IN ('queued', 'running')
+                    RETURNING *
                     """,
                     (str(batch_id),),
-                )
+                ).fetchall()
+                for job in cancelled_jobs:
+                    if job.get("library_item_id"):
+                        conn.execute(
+                            """
+                            UPDATE document_library_items
+                            SET status = 'cancelled',
+                                stage = 'cancelled',
+                                percent = %s,
+                                processed_at = now(),
+                                updated_at = now()
+                            WHERE id = %s
+                              AND current_job_id = %s
+                            """,
+                            (
+                                int(job.get("percent") or 0),
+                                str(job["library_item_id"]),
+                                str(job["id"]),
+                            ),
+                        )
                 self.add_event_in_conn(
                     conn,
+                    library_item_id=None,
                     batch_id=batch_id,
                     job_id=None,
                     event_type="failed",
@@ -702,6 +1282,7 @@ class Repository:
         self,
         conn: Any,
         *,
+        library_item_id: Optional[UUID] = None,
         batch_id: Optional[UUID],
         job_id: Optional[UUID],
         event_type: str,
@@ -712,10 +1293,13 @@ class Repository:
     ) -> None:
         conn.execute(
             """
-            INSERT INTO job_events(batch_id, job_id, event_type, stage, percent, message, payload_json)
-            VALUES(%s,%s,%s,%s,%s,%s,%s::jsonb)
+            INSERT INTO job_events(
+              library_item_id, batch_id, job_id, event_type, stage, percent, message, payload_json
+            )
+            VALUES(%s,%s,%s,%s,%s,%s,%s,%s::jsonb)
             """,
             (
+                str(library_item_id) if library_item_id else None,
                 str(batch_id) if batch_id else None,
                 str(job_id) if job_id else None,
                 event_type,
@@ -799,3 +1383,53 @@ class Repository:
                 (str(asset_id), str(batch_id)),
             )
             conn.commit()
+
+    def forget_assets(self, asset_ids: List[UUID]) -> int:
+        if not asset_ids:
+            return 0
+        ids = [str(asset_id) for asset_id in asset_ids]
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute(
+                    """
+                    UPDATE document_jobs
+                    SET result_markdown_asset_id = NULL
+                    WHERE result_markdown_asset_id = ANY(%s::uuid[])
+                    """,
+                    (ids,),
+                )
+                conn.execute(
+                    """
+                    UPDATE document_batches
+                    SET result_archive_asset_id = NULL
+                    WHERE result_archive_asset_id = ANY(%s::uuid[])
+                    """,
+                    (ids,),
+                )
+                conn.execute(
+                    """
+                    UPDATE document_library_items
+                    SET latest_markdown_asset_id = CASE
+                          WHEN latest_markdown_asset_id = ANY(%s::uuid[]) THEN NULL
+                          ELSE latest_markdown_asset_id
+                        END,
+                        preview_asset_id = CASE
+                          WHEN preview_asset_id = ANY(%s::uuid[]) THEN NULL
+                          ELSE preview_asset_id
+                        END,
+                        thumbnail_asset_id = CASE
+                          WHEN thumbnail_asset_id = ANY(%s::uuid[]) THEN NULL
+                          ELSE thumbnail_asset_id
+                        END,
+                        updated_at = now()
+                    WHERE latest_markdown_asset_id = ANY(%s::uuid[])
+                       OR preview_asset_id = ANY(%s::uuid[])
+                       OR thumbnail_asset_id = ANY(%s::uuid[])
+                    """,
+                    (ids, ids, ids, ids, ids, ids),
+                )
+                rows = conn.execute(
+                    "DELETE FROM document_assets WHERE id = ANY(%s::uuid[]) RETURNING id",
+                    (ids,),
+                ).fetchall()
+                return len(rows)

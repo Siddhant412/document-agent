@@ -20,6 +20,7 @@ CREATE TABLE IF NOT EXISTS document_batches (
 CREATE TABLE IF NOT EXISTS document_jobs (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   batch_id UUID REFERENCES document_batches(id) ON DELETE SET NULL,
+  library_item_id UUID,
   input_index INTEGER,
   idempotency_key TEXT,
   status TEXT NOT NULL DEFAULT 'queued',
@@ -30,6 +31,7 @@ CREATE TABLE IF NOT EXISTS document_jobs (
   size_bytes BIGINT NOT NULL,
   source_bucket TEXT NOT NULL,
   source_object_key TEXT NOT NULL,
+  source_asset_id UUID,
   source_deleted_at TIMESTAMPTZ,
   stage TEXT NOT NULL DEFAULT 'queued',
   percent INTEGER NOT NULL DEFAULT 0,
@@ -49,6 +51,12 @@ CREATE TABLE IF NOT EXISTS document_jobs (
   CHECK (percent >= 0 AND percent <= 100)
 );
 
+ALTER TABLE document_jobs
+  ADD COLUMN IF NOT EXISTS library_item_id UUID;
+
+ALTER TABLE document_jobs
+  ADD COLUMN IF NOT EXISTS source_asset_id UUID;
+
 CREATE UNIQUE INDEX IF NOT EXISTS document_jobs_single_idempotency_uq
   ON document_jobs(idempotency_key)
   WHERE idempotency_key IS NOT NULL AND batch_id IS NULL;
@@ -59,12 +67,16 @@ CREATE INDEX IF NOT EXISTS document_jobs_queue_idx
 CREATE INDEX IF NOT EXISTS document_jobs_batch_idx
   ON document_jobs(batch_id, input_index, created_at);
 
+CREATE INDEX IF NOT EXISTS document_jobs_library_item_idx
+  ON document_jobs(library_item_id, created_at);
+
 CREATE INDEX IF NOT EXISTS document_jobs_lease_idx
   ON document_jobs(status, lease_expires_at)
   WHERE status = 'running';
 
 CREATE TABLE IF NOT EXISTS document_assets (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  library_item_id UUID,
   batch_id UUID REFERENCES document_batches(id) ON DELETE SET NULL,
   job_id UUID REFERENCES document_jobs(id) ON DELETE SET NULL,
   role TEXT NOT NULL,
@@ -78,6 +90,9 @@ CREATE TABLE IF NOT EXISTS document_assets (
   metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb
 );
 
+ALTER TABLE document_assets
+  ADD COLUMN IF NOT EXISTS library_item_id UUID;
+
 CREATE UNIQUE INDEX IF NOT EXISTS document_assets_object_uq
   ON document_assets(bucket, object_key);
 
@@ -86,6 +101,50 @@ CREATE INDEX IF NOT EXISTS document_assets_job_idx
 
 CREATE INDEX IF NOT EXISTS document_assets_batch_idx
   ON document_assets(batch_id, role);
+
+CREATE INDEX IF NOT EXISTS document_assets_library_item_idx
+  ON document_assets(library_item_id, role);
+
+CREATE TABLE IF NOT EXISTS document_library_items (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  batch_id UUID REFERENCES document_batches(id) ON DELETE SET NULL,
+  current_job_id UUID REFERENCES document_jobs(id) ON DELETE SET NULL,
+  input_index INTEGER,
+  original_filename TEXT NOT NULL,
+  display_filename TEXT NOT NULL,
+  content_type TEXT,
+  detected_type TEXT,
+  sha256 TEXT NOT NULL,
+  size_bytes BIGINT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'queued',
+  stage TEXT NOT NULL DEFAULT 'queued',
+  percent INTEGER NOT NULL DEFAULT 0,
+  preview_status TEXT NOT NULL DEFAULT 'pending',
+  original_asset_id UUID,
+  preview_asset_id UUID,
+  thumbnail_asset_id UUID,
+  latest_markdown_asset_id UUID,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  uploaded_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  processed_at TIMESTAMPTZ,
+  deleted_at TIMESTAMPTZ,
+  error_code TEXT,
+  error_message TEXT,
+  error_details_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  metadata_json JSONB NOT NULL DEFAULT '{}'::jsonb,
+  CHECK (percent >= 0 AND percent <= 100)
+);
+
+ALTER TABLE document_library_items
+  ADD COLUMN IF NOT EXISTS preview_status TEXT NOT NULL DEFAULT 'pending';
+
+CREATE INDEX IF NOT EXISTS document_library_items_status_idx
+  ON document_library_items(status, created_at DESC)
+  WHERE deleted_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS document_library_items_batch_idx
+  ON document_library_items(batch_id, input_index, created_at);
 
 DO $$
 BEGIN
@@ -115,6 +174,7 @@ END $$;
 
 CREATE TABLE IF NOT EXISTS job_events (
   id BIGSERIAL PRIMARY KEY,
+  library_item_id UUID,
   batch_id UUID REFERENCES document_batches(id) ON DELETE SET NULL,
   job_id UUID REFERENCES document_jobs(id) ON DELETE SET NULL,
   event_type TEXT NOT NULL,
@@ -125,11 +185,17 @@ CREATE TABLE IF NOT EXISTS job_events (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE job_events
+  ADD COLUMN IF NOT EXISTS library_item_id UUID;
+
 CREATE INDEX IF NOT EXISTS job_events_job_idx
   ON job_events(job_id, id);
 
 CREATE INDEX IF NOT EXISTS job_events_batch_idx
   ON job_events(batch_id, id);
+
+CREATE INDEX IF NOT EXISTS job_events_library_item_idx
+  ON job_events(library_item_id, id);
 
 CREATE INDEX IF NOT EXISTS job_events_created_idx
   ON job_events(created_at);

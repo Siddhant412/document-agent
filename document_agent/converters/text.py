@@ -14,6 +14,7 @@ class TextConverter(Converter):
         markdown = with_frontmatter(
             body,
             job_id=context.job_id,
+            library_item_id=context.library_item_id,
             batch_id=context.batch_id,
             filename=context.filename,
             detected_type=context.detected_type,
@@ -29,4 +30,3 @@ def _decode_text(raw: bytes) -> str:
         except UnicodeDecodeError:
             continue
     return raw.decode("utf-8", errors="replace")
-

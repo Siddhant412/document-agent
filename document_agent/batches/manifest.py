@@ -30,6 +30,7 @@ def build_batch_manifest(
             {
                 "input_index": job.get("input_index"),
                 "filename": job["filename"],
+                "library_item_id": job.get("library_item_id"),
                 "job_id": job["id"],
                 "status": job["status"],
                 "markdown_url": markdown_url,
