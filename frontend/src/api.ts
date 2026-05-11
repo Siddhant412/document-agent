@@ -64,6 +64,30 @@ export interface MarkdownResponse {
   metadata: Record<string, unknown>;
 }
 
+export interface SearchHit {
+  library_item_id: string;
+  job_id: string;
+  asset_id: string;
+  filename: string;
+  detected_type: string | null;
+  score: number;
+  keyword_score: number;
+  semantic_score: number;
+  chunk_index: number | null;
+  snippet: string;
+  markdown_url: string;
+  preview_url: string;
+  processed_at: string | null;
+}
+
+export interface SearchResponse {
+  query: string;
+  hits: SearchHit[];
+  limit: number;
+  offset: number;
+  total: number;
+}
+
 export interface ApiOptions {
   apiKey?: string;
   apiKeyHeader?: string;
@@ -131,6 +155,30 @@ export async function getMarkdown(id: string, options: ApiOptions): Promise<Mark
   return apiJson<MarkdownResponse>(
     `/v1/library/${id}/markdown?include_markdown=true`,
     { method: "GET" },
+    options
+  );
+}
+
+export async function searchLibraryContent(
+  params: { q: string; detectedType?: string; limit?: number; mode?: "keyword" | "semantic" | "hybrid" },
+  options: ApiOptions
+): Promise<SearchResponse> {
+  const query = new URLSearchParams({
+    q: params.q,
+    limit: String(params.limit ?? 20),
+    offset: "0",
+  });
+  if (params.detectedType && params.detectedType !== "all") {
+    query.set("detected_type", params.detectedType);
+  }
+  if (params.mode) query.set("mode", params.mode);
+  return apiJson<SearchResponse>(`/v1/search?${query}`, { method: "GET" }, options);
+}
+
+export async function reindexSearch(options: ApiOptions): Promise<{ indexed: number; skipped: number; limit: number }> {
+  return apiJson<{ indexed: number; skipped: number; limit: number }>(
+    "/v1/search/reindex",
+    { method: "POST" },
     options
   );
 }

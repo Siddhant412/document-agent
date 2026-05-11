@@ -7,11 +7,17 @@ from uuid import UUID, uuid4
 from document_agent.config import Settings, get_settings
 from document_agent.db.connection import get_pool
 from document_agent.metrics import ASSETS_UPLOADED
+from document_agent.search.models import SearchHit
+from document_agent.search.text import clean_headline
 from document_agent.status import batch_status_from_counts
 
 
 def _json_payload(value: Optional[Dict[str, Any]]) -> str:
     return json.dumps(value or {}, ensure_ascii=False)
+
+
+def _vector_literal(values: list[float]) -> str:
+    return "[" + ",".join(f"{float(value):.9g}" for value in values) + "]"
 
 
 class Repository:
@@ -382,6 +388,361 @@ class Repository:
             ).fetchall()
             return [dict(row) for row in rows]
 
+    def upsert_search_entry(
+        self,
+        *,
+        library_item_id: UUID,
+        job_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        detected_type: Optional[str],
+        content: str,
+    ) -> None:
+        with self.pool.connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO document_search_entries(
+                  library_item_id, job_id, asset_id, filename, detected_type, content
+                ) VALUES(%s,%s,%s,%s,%s,%s)
+                ON CONFLICT (library_item_id) DO UPDATE
+                SET job_id = EXCLUDED.job_id,
+                    asset_id = EXCLUDED.asset_id,
+                    filename = EXCLUDED.filename,
+                    detected_type = EXCLUDED.detected_type,
+                    content = EXCLUDED.content,
+                    updated_at = now()
+                """,
+                (
+                    str(library_item_id),
+                    str(job_id),
+                    str(asset_id),
+                    filename,
+                    detected_type,
+                    content,
+                ),
+            )
+            conn.commit()
+
+    def delete_search_entry(self, library_item_id: UUID) -> None:
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute(
+                    "DELETE FROM document_search_entries WHERE library_item_id = %s",
+                    (str(library_item_id),),
+                )
+                conn.execute(
+                    "DELETE FROM document_search_chunks WHERE library_item_id = %s",
+                    (str(library_item_id),),
+                )
+            conn.commit()
+
+    def replace_search_chunks(
+        self,
+        *,
+        library_item_id: UUID,
+        job_id: UUID,
+        asset_id: UUID,
+        filename: str,
+        detected_type: Optional[str],
+        chunks: list[tuple[int, str, list[float]]],
+    ) -> None:
+        with self.pool.connection() as conn:
+            with conn.transaction():
+                conn.execute(
+                    "DELETE FROM document_search_chunks WHERE library_item_id = %s",
+                    (str(library_item_id),),
+                )
+                if not chunks:
+                    return
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO document_search_chunks(
+                          library_item_id, job_id, asset_id, chunk_index, filename,
+                          detected_type, content, embedding
+                        ) VALUES(%s,%s,%s,%s,%s,%s,%s,%s::vector)
+                        """,
+                        [
+                            (
+                                str(library_item_id),
+                                str(job_id),
+                                str(asset_id),
+                                int(index),
+                                filename,
+                                detected_type,
+                                content,
+                                _vector_literal(embedding),
+                            )
+                            for index, content, embedding in chunks
+                        ],
+                    )
+
+    def list_markdown_assets_for_search_reindex(
+        self,
+        *,
+        limit: int = 500,
+        only_missing: bool = True,
+    ) -> List[Dict[str, Any]]:
+        missing_clause = "AND se.library_item_id IS NULL" if only_missing else ""
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                  li.id AS library_item_id,
+                  li.current_job_id AS job_id,
+                  li.display_filename AS filename,
+                  li.detected_type,
+                  a.id AS asset_id,
+                  a.bucket,
+                  a.object_key
+                FROM document_library_items AS li
+                JOIN document_assets AS a ON a.id = li.latest_markdown_asset_id
+                LEFT JOIN document_search_entries AS se ON se.library_item_id = li.id
+                WHERE li.deleted_at IS NULL
+                  AND li.status = 'succeeded'
+                  AND li.latest_markdown_asset_id IS NOT NULL
+                  {missing_clause}
+                ORDER BY li.processed_at DESC NULLS LAST, li.updated_at DESC
+                LIMIT %s
+                """,
+                (int(limit),),
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def search_documents(
+        self,
+        *,
+        query: str,
+        limit: int = 20,
+        offset: int = 0,
+        detected_type: Optional[str] = None,
+        library_item_id: Optional[UUID] = None,
+    ) -> tuple[List[SearchHit], int]:
+        clauses = [
+            "li.deleted_at IS NULL",
+            "li.status = 'succeeded'",
+            "(q.query @@ se.search_vector OR se.content ILIKE %s OR se.filename ILIKE %s)",
+        ]
+        pattern = f"%{query}%"
+        params: List[Any] = [query, pattern, pattern]
+        if detected_type:
+            clauses.append("se.detected_type = %s")
+            params.append(detected_type)
+        if library_item_id:
+            clauses.append("se.library_item_id = %s")
+            params.append(str(library_item_id))
+
+        where_sql = " AND ".join(clauses)
+        count_params = tuple(params)
+        select_params = tuple(params + [int(limit), int(offset)])
+        with self.pool.connection() as conn:
+            total_row = conn.execute(
+                f"""
+                WITH q AS (SELECT websearch_to_tsquery('simple', %s) AS query)
+                SELECT count(*) AS total
+                FROM document_search_entries AS se
+                JOIN document_library_items AS li ON li.id = se.library_item_id
+                CROSS JOIN q
+                WHERE {where_sql}
+                """,
+                count_params,
+            ).fetchone()
+            rows = conn.execute(
+                f"""
+                WITH q AS (SELECT websearch_to_tsquery('simple', %s) AS query)
+                SELECT
+                  se.library_item_id,
+                  se.job_id,
+                  se.asset_id,
+                  se.filename,
+                  se.detected_type,
+                  se.content,
+                  li.processed_at,
+                  ts_rank_cd(se.search_vector, q.query) AS score,
+                  ts_headline(
+                    'simple',
+                    se.content,
+                    q.query,
+                    'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=12, MaxFragments=3, FragmentDelimiter= ... '
+                  ) AS headline
+                FROM document_search_entries AS se
+                JOIN document_library_items AS li ON li.id = se.library_item_id
+                CROSS JOIN q
+                WHERE {where_sql}
+                ORDER BY
+                  (q.query @@ se.search_vector) DESC,
+                  ts_rank_cd(se.search_vector, q.query) DESC,
+                  li.processed_at DESC NULLS LAST,
+                  se.updated_at DESC
+                LIMIT %s OFFSET %s
+                """,
+                select_params,
+            ).fetchall()
+
+        hits = [
+            SearchHit(
+                library_item_id=UUID(str(row["library_item_id"])),
+                job_id=UUID(str(row["job_id"])),
+                asset_id=UUID(str(row["asset_id"])),
+                filename=row["filename"],
+                detected_type=row.get("detected_type"),
+                score=float(row.get("score") or 0.0),
+                snippet=clean_headline(row.get("headline") or "", row.get("content") or "", query),
+                markdown_url=self._library_markdown_url(UUID(str(row["library_item_id"]))),
+                preview_url=self._library_preview_url(UUID(str(row["library_item_id"]))),
+                processed_at=row.get("processed_at"),
+            )
+            for row in rows
+        ]
+        return hits, int(total_row["total"] if total_row else 0)
+
+    def search_chunks_keyword(
+        self,
+        *,
+        query: str,
+        limit: int = 40,
+        detected_type: Optional[str] = None,
+        library_item_id: Optional[UUID] = None,
+    ) -> List[SearchHit]:
+        clauses = [
+            "li.deleted_at IS NULL",
+            "li.status = 'succeeded'",
+            "(q.query @@ sc.search_vector OR sc.content ILIKE %s OR sc.filename ILIKE %s)",
+        ]
+        pattern = f"%{query}%"
+        params: List[Any] = [query, pattern, pattern]
+        if detected_type:
+            clauses.append("sc.detected_type = %s")
+            params.append(detected_type)
+        if library_item_id:
+            clauses.append("sc.library_item_id = %s")
+            params.append(str(library_item_id))
+        params.append(int(limit))
+        where_sql = " AND ".join(clauses)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                WITH q AS (SELECT websearch_to_tsquery('simple', %s) AS query)
+                SELECT
+                  sc.library_item_id,
+                  sc.job_id,
+                  sc.asset_id,
+                  sc.chunk_index,
+                  sc.filename,
+                  sc.detected_type,
+                  sc.content,
+                  li.processed_at,
+                  ts_rank_cd(sc.search_vector, q.query) AS score,
+                  ts_headline(
+                    'simple',
+                    sc.content,
+                    q.query,
+                    'StartSel=<mark>, StopSel=</mark>, MaxWords=35, MinWords=12, MaxFragments=3, FragmentDelimiter= ... '
+                  ) AS headline
+                FROM document_search_chunks AS sc
+                JOIN document_library_items AS li ON li.id = sc.library_item_id
+                CROSS JOIN q
+                WHERE {where_sql}
+                ORDER BY
+                  (q.query @@ sc.search_vector) DESC,
+                  ts_rank_cd(sc.search_vector, q.query) DESC,
+                  li.processed_at DESC NULLS LAST
+                LIMIT %s
+                """,
+                tuple(params),
+            ).fetchall()
+        return [
+            self._search_hit_from_row(
+                row,
+                query=query,
+                score=float(row.get("score") or 0.0),
+                keyword_score=float(row.get("score") or 0.0),
+                semantic_score=0.0,
+            )
+            for row in rows
+        ]
+
+    def search_chunks_semantic(
+        self,
+        *,
+        query: str,
+        embedding: list[float],
+        limit: int = 40,
+        detected_type: Optional[str] = None,
+        library_item_id: Optional[UUID] = None,
+    ) -> List[SearchHit]:
+        clauses = [
+            "li.deleted_at IS NULL",
+            "li.status = 'succeeded'",
+            "sc.embedding IS NOT NULL",
+        ]
+        vector = _vector_literal(embedding)
+        filter_params: List[Any] = []
+        if detected_type:
+            clauses.append("sc.detected_type = %s")
+            filter_params.append(detected_type)
+        if library_item_id:
+            clauses.append("sc.library_item_id = %s")
+            filter_params.append(str(library_item_id))
+        where_sql = " AND ".join(clauses)
+        with self.pool.connection() as conn:
+            rows = conn.execute(
+                f"""
+                SELECT
+                  sc.library_item_id,
+                  sc.job_id,
+                  sc.asset_id,
+                  sc.chunk_index,
+                  sc.filename,
+                  sc.detected_type,
+                  sc.content,
+                  li.processed_at,
+                  1 - (sc.embedding <=> %s::vector) AS similarity,
+                  NULL::text AS headline
+                FROM document_search_chunks AS sc
+                JOIN document_library_items AS li ON li.id = sc.library_item_id
+                WHERE {where_sql}
+                ORDER BY sc.embedding <=> %s::vector
+                LIMIT %s
+                """,
+                tuple([vector, *filter_params, vector, int(limit)]),
+            ).fetchall()
+        return [
+            self._search_hit_from_row(
+                row,
+                query=query,
+                score=float(row.get("similarity") or 0.0),
+                keyword_score=0.0,
+                semantic_score=float(row.get("similarity") or 0.0),
+            )
+            for row in rows
+        ]
+
+    def _search_hit_from_row(
+        self,
+        row: Dict[str, Any],
+        *,
+        query: str,
+        score: float,
+        keyword_score: float,
+        semantic_score: float,
+    ) -> SearchHit:
+        return SearchHit(
+            library_item_id=UUID(str(row["library_item_id"])),
+            job_id=UUID(str(row["job_id"])),
+            asset_id=UUID(str(row["asset_id"])),
+            filename=row["filename"],
+            detected_type=row.get("detected_type"),
+            score=score,
+            keyword_score=keyword_score,
+            semantic_score=semantic_score,
+            chunk_index=int(row["chunk_index"]) if row.get("chunk_index") is not None else None,
+            snippet=clean_headline(row.get("headline") or "", row.get("content") or "", query),
+            markdown_url=self._library_markdown_url(UUID(str(row["library_item_id"]))),
+            preview_url=self._library_preview_url(UUID(str(row["library_item_id"]))),
+            processed_at=row.get("processed_at"),
+        )
+
     def mark_library_preview_failed(self, *, library_item_id: UUID, message: str) -> None:
         with self.pool.connection() as conn:
             conn.execute(
@@ -432,6 +793,14 @@ class Repository:
                         latest_markdown_asset_id = NULL
                     WHERE id = %s
                     """,
+                    (str(library_item_id),),
+                )
+                conn.execute(
+                    "DELETE FROM document_search_entries WHERE library_item_id = %s",
+                    (str(library_item_id),),
+                )
+                conn.execute(
+                    "DELETE FROM document_search_chunks WHERE library_item_id = %s",
                     (str(library_item_id),),
                 )
                 rows = conn.execute(

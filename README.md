@@ -42,7 +42,7 @@ Runtime services:
 
 - `api`: FastAPI upload/library/status/SSE/result API and web UI on `http://localhost:8080`.
 - `worker`: async document processor and worker metrics on `http://localhost:8081/metrics`.
-- `postgres`: job, batch, lease, asset, and event metadata.
+- `postgres`: pgvector-enabled Postgres for jobs, batches, leases, assets, events, and search indexes.
 - `minio`: Markdown result and extracted asset object storage.
 
 ## Prerequisites
@@ -87,14 +87,24 @@ API_KEY=
 MAX_UPLOAD_BYTES=104857600
 MAX_BATCH_FILES=100
 MAX_BATCH_BYTES=1073741824
+UPLOAD_SPOOL_CHUNK_BYTES=1048576
 MAX_PDF_PAGES=500
 OCR_MAX_CONCURRENT_REQUESTS=2
 COMPLETED_RESULT_RETENTION_SECONDS=0
 ORIGINAL_FILE_RETENTION_SECONDS=0
+SEARCH_SEMANTIC_ENABLED=true
+SEARCH_EMBEDDING_MODEL=BAAI/bge-base-en-v1.5
+SEARCH_EMBEDDING_CACHE_DIR=/tmp/fastembed_cache
+SEARCH_EMBEDDING_DIMENSION=768
+SEARCH_CHUNK_CHARS=1200
+SEARCH_CHUNK_OVERLAP=180
+HYBRID_SEARCH_ALPHA=0.5
 ```
 
 `COMPLETED_RESULT_RETENTION_SECONDS=0` keeps completed Markdown/assets until explicit deletion. Set a positive value only when old completed results should be deleted automatically by the worker.
 `ORIGINAL_FILE_RETENTION_SECONDS=0` keeps uploaded originals until explicit library deletion.
+
+Semantic search uses FastEmbed and stores vectors in pgvector. The first semantic or hybrid search may take longer while the embedding model downloads into `SEARCH_EMBEDDING_CACHE_DIR`.
 
 ## Start
 
@@ -141,6 +151,22 @@ http://localhost:8080/app
 ```
 
 The UI supports single and multi-file upload, background queue status, a file library list, original/converted previews, Markdown preview/raw views, Markdown download, delete, and reprocess from the retained original file.
+
+The library search box searches both filenames and converted document text. Search is hybrid by default: Postgres full-text keyword search plus pgvector semantic search over Markdown chunks. Search results are clickable; selecting a result opens the same library item preview and Markdown panes as selecting a file from the library list.
+
+If you already had completed documents before enabling search, build the index once:
+
+```bash
+curl -fsS -X POST "http://localhost:8080/v1/search/reindex"
+```
+
+If `API_KEY` is configured:
+
+```bash
+curl -fsS -X POST \
+  -H "X-API-Key: ${API_KEY}" \
+  "http://localhost:8080/v1/search/reindex"
+```
 
 If `API_KEY` is set, open the settings button in the UI and enter the same key. Static UI files remain public, but API calls still require the configured key.
 
@@ -234,6 +260,70 @@ Fetch the same result through the stable library item endpoint:
 
 ```bash
 curl -fsS "http://localhost:8080/v1/library/${library_item_id}/markdown?include_markdown=true"
+```
+
+## Search Converted Documents
+
+Search all completed Markdown results with hybrid ranking:
+
+```bash
+curl -fsS "http://localhost:8080/v1/search?q=energy%20savings&mode=hybrid"
+```
+
+Supported modes are:
+
+```text
+hybrid    keyword + semantic ranking, default
+keyword   Postgres full-text search only
+semantic  pgvector embedding search only
+```
+
+Hybrid ranking retrieves keyword and semantic candidates separately, then merges them with reciprocal rank fusion. `HYBRID_SEARCH_ALPHA` controls how much semantic ranking contributes to the merged score: `0.0` means keyword-only influence, `1.0` means semantic-only influence, and the default `0.5` balances both.
+
+Limit search to PDFs:
+
+```bash
+curl -fsS "http://localhost:8080/v1/search?q=energy%20savings&detected_type=pdf&mode=hybrid"
+```
+
+Search within one library item:
+
+```bash
+curl -fsS "http://localhost:8080/v1/search?q=energy%20savings&library_item_id=${library_item_id}"
+```
+
+The response includes matching files, snippets, score, and stable preview/Markdown URLs:
+
+```json
+{
+  "query": "energy savings",
+  "hits": [
+    {
+      "library_item_id": "...",
+      "job_id": "...",
+      "asset_id": "...",
+      "filename": "dormitory-energy-saving-pilot-report.pdf",
+      "detected_type": "pdf",
+      "score": 0.42,
+      "keyword_score": 0.12,
+      "semantic_score": 0.83,
+      "chunk_index": 3,
+      "snippet": "...<mark>energy</mark> <mark>savings</mark>...",
+      "markdown_url": "http://localhost:8080/v1/library/.../markdown",
+      "preview_url": "http://localhost:8080/v1/library/.../preview",
+      "processed_at": "..."
+    }
+  ],
+  "limit": 20,
+  "offset": 0,
+  "total": 1
+}
+```
+
+Search indexes are updated automatically when the worker finishes a conversion. Deleting a library item also removes its search index rows. If you uploaded or processed files before search was enabled, or you changed chunking/embedding settings, rebuild the index:
+
+```bash
+curl -fsS -X POST "http://localhost:8080/v1/search/reindex?only_missing=false"
 ```
 
 Save only the Markdown to a local file:
@@ -415,6 +505,19 @@ Job stays `running` at OCR stage:
 - Check worker logs with `docker compose logs -f worker`.
 - Confirm `OCR_SERVER_URL`, `OCR_API_KEY`, and `OCR_MODEL` are set in `.env`.
 - Check worker OCR metrics at `http://localhost:8081/metrics`.
+
+Search returns `Internal Server Error`:
+
+- Confirm the stack was rebuilt after enabling search: `docker compose up -d --build api worker`.
+- Confirm Postgres is using the pgvector image from `docker-compose.yml`: `pgvector/pgvector:pg16`.
+- Check API logs with `docker compose logs -f api`.
+- If the embedding cache was interrupted during first download, delete the cache inside the container or change `SEARCH_EMBEDDING_CACHE_DIR`, then retry the search.
+
+Search shows duplicate-looking results:
+
+- Duplicate uploads are treated as separate library items, even when filenames match.
+- Clear the UI search/filter and delete the extra library item, or call `DELETE /v1/library/{library_item_id}`.
+- Deleted library items are filtered from search and their index rows are removed.
 
 Office conversion fails:
 

@@ -1,4 +1,5 @@
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
+CREATE EXTENSION IF NOT EXISTS vector;
 
 CREATE TABLE IF NOT EXISTS document_batches (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -199,3 +200,62 @@ CREATE INDEX IF NOT EXISTS job_events_library_item_idx
 
 CREATE INDEX IF NOT EXISTS job_events_created_idx
   ON job_events(created_at);
+
+CREATE TABLE IF NOT EXISTS document_search_entries (
+  library_item_id UUID PRIMARY KEY,
+  job_id UUID REFERENCES document_jobs(id) ON DELETE CASCADE,
+  asset_id UUID REFERENCES document_assets(id) ON DELETE CASCADE,
+  filename TEXT NOT NULL,
+  detected_type TEXT,
+  content TEXT NOT NULL,
+  search_vector TSVECTOR GENERATED ALWAYS AS (
+    setweight(to_tsvector('simple', coalesce(filename, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(content, '')), 'B')
+  ) STORED,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+ALTER TABLE document_search_entries
+  ADD COLUMN IF NOT EXISTS detected_type TEXT;
+
+CREATE INDEX IF NOT EXISTS document_search_entries_vector_idx
+  ON document_search_entries USING GIN(search_vector);
+
+CREATE INDEX IF NOT EXISTS document_search_entries_type_idx
+  ON document_search_entries(detected_type);
+
+CREATE INDEX IF NOT EXISTS document_search_entries_job_idx
+  ON document_search_entries(job_id);
+
+CREATE TABLE IF NOT EXISTS document_search_chunks (
+  id BIGSERIAL PRIMARY KEY,
+  library_item_id UUID NOT NULL,
+  job_id UUID REFERENCES document_jobs(id) ON DELETE CASCADE,
+  asset_id UUID REFERENCES document_assets(id) ON DELETE CASCADE,
+  chunk_index INTEGER NOT NULL,
+  filename TEXT NOT NULL,
+  detected_type TEXT,
+  content TEXT NOT NULL,
+  embedding vector(768),
+  search_vector TSVECTOR GENERATED ALWAYS AS (
+    setweight(to_tsvector('simple', coalesce(filename, '')), 'A') ||
+    setweight(to_tsvector('simple', coalesce(content, '')), 'B')
+  ) STORED,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE(library_item_id, chunk_index)
+);
+
+CREATE INDEX IF NOT EXISTS document_search_chunks_vector_idx
+  ON document_search_chunks USING hnsw (embedding vector_cosine_ops)
+  WITH (m = 16, ef_construction = 64);
+
+CREATE INDEX IF NOT EXISTS document_search_chunks_fts_idx
+  ON document_search_chunks USING GIN(search_vector);
+
+CREATE INDEX IF NOT EXISTS document_search_chunks_library_idx
+  ON document_search_chunks(library_item_id, chunk_index);
+
+CREATE INDEX IF NOT EXISTS document_search_chunks_type_idx
+  ON document_search_chunks(detected_type);

@@ -208,6 +208,128 @@ button {
   cursor: pointer;
 }
 
+.content-search {
+  display: flex;
+  min-height: 0;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #d6dde8;
+  border-radius: 8px;
+  background: #ffffff;
+}
+
+.content-search.compact {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.content-search strong {
+  display: block;
+  color: #111827;
+  font-size: 12px;
+}
+
+.content-search span {
+  display: block;
+  color: #64748b;
+  font-size: 11px;
+}
+
+.content-search-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.content-search-head select {
+  height: 28px;
+  border: 1px solid #d3dae6;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #334155;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.mini-button {
+  display: inline-flex;
+  height: 28px;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid #d3dae6;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: #334155;
+  cursor: pointer;
+  font-size: 11px;
+  font-weight: 800;
+  padding: 0 9px;
+}
+
+.content-search-results {
+  display: flex;
+  max-height: 260px;
+  min-height: 0;
+  flex-direction: column;
+  gap: 6px;
+  overflow: auto;
+}
+
+.search-hit {
+  display: block;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid #e3e8f0;
+  border-radius: 7px;
+  background: #f8fafc;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.search-hit:hover {
+  border-color: #b7c6df;
+  background: #ffffff;
+}
+
+.search-hit-title {
+  overflow: hidden;
+  color: #111827 !important;
+  font-size: 12px !important;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.search-snippet {
+  display: -webkit-box !important;
+  margin-top: 4px;
+  overflow: hidden;
+  color: #475569 !important;
+  font-size: 11px !important;
+  line-height: 1.35;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+.search-snippet mark {
+  border-radius: 3px;
+  background: #fde68a;
+  color: #111827;
+  padding: 0 2px;
+}
+
+.search-empty {
+  padding: 8px;
+  color: #64748b;
+  font-size: 12px;
+  text-align: center;
+}
+
 .file-list {
   display: flex;
   min-height: 0;

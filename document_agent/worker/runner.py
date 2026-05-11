@@ -21,6 +21,7 @@ from document_agent.errors import DocumentAgentError, error_from_exception
 from document_agent.logging_config import configure_logging
 from document_agent.metrics import CONVERSION_DURATION_SECONDS, JOBS_COMPLETED
 from document_agent.previews import ensure_preview
+from document_agent.search.engine import DocumentSearchEngine
 from document_agent.status import TERMINAL_JOB_STATUSES
 from document_agent.storage import ObjectStore
 from document_agent.utils import safe_filename
@@ -123,6 +124,18 @@ class Worker:
             )
             markdown_asset_id = self._persist_markdown(job=job, markdown=result.markdown)
             self._persist_conversion_manifest(job=job, result_metadata=result.metadata)
+            if job.get("library_item_id"):
+                try:
+                    DocumentSearchEngine(self.repository, self.object_store).index_markdown(
+                        library_item_id=UUID(str(job["library_item_id"])),
+                        job_id=job_id,
+                        asset_id=markdown_asset_id,
+                        filename=job["filename"],
+                        detected_type=job.get("detected_type"),
+                        markdown=result.markdown,
+                    )
+                except Exception:
+                    logger.exception("search_index_failed job_id=%s", job_id)
             terminal = self.repository.mark_job_succeeded(
                 job_id=job_id,
                 markdown_asset_id=markdown_asset_id,

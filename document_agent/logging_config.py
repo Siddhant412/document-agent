@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import collections
+import datetime as dt
 import logging
 import sys
 import threading
@@ -23,7 +24,7 @@ class RingBufferHandler(logging.Handler):
                 self._seq += 1
                 self._buffer.append({
                     "seq": self._seq,
-                    "ts": self.formatTime(record, "%Y-%m-%dT%H:%M:%S"),
+                    "ts": dt.datetime.fromtimestamp(record.created, tz=dt.UTC).isoformat(timespec="seconds"),
                     "level": record.levelname,
                     "logger": record.name,
                     "message": record.getMessage(),
@@ -90,4 +91,3 @@ def configure_logging(level: str = "INFO") -> None:
     ring = RingBufferHandler(capacity=2000)
     root.addHandler(ring)
     _RING_BUFFER = ring
-

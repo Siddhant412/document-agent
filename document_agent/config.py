@@ -60,6 +60,15 @@ class Settings(BaseSettings):
     libreoffice_bin: str = "soffice"
     pdf_use_vendor_extractor: bool = True
 
+    search_semantic_enabled: bool = True
+    search_embedding_model: str = "BAAI/bge-base-en-v1.5"
+    search_embedding_device: str = "cpu"
+    search_embedding_cache_dir: str = "/tmp/fastembed_cache"
+    search_embedding_dimension: int = 768
+    search_chunk_chars: int = 1200
+    search_chunk_overlap: int = 180
+    hybrid_search_alpha: float = 0.5
+
     upload_spool_chunk_bytes: int = Field(default=1024 * 1024)
 
 

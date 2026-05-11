@@ -26,12 +26,15 @@ import {
   ApiError,
   ApiOptions,
   LibraryItem,
+  SearchHit,
   apiBlob,
   deleteLibraryItem,
   getLibraryItem,
   getMarkdown,
   listLibrary,
+  reindexSearch,
   reprocessLibraryItem,
+  searchLibraryContent,
   uploadFiles
 } from "./api";
 import "./styles.css";
@@ -60,20 +63,30 @@ const STATUS_FILTERS = ["all", "queued", "running", "succeeded", "failed", "canc
 function App() {
   const [items, setItems] = useState<LibraryItem[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedItem, setSelectedItem] = useState<LibraryItem | null>(null);
   const [query, setQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
   const [typeFilter, setTypeFilter] = useState("all");
+  const [searchMode, setSearchMode] = useState<"hybrid" | "keyword" | "semantic">("hybrid");
   const [apiKey, setApiKey] = useLocalStorage("document-agent-api-key", "");
   const [showSettings, setShowSettings] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
+  const [searchTotal, setSearchTotal] = useState(0);
+  const [searchLoading, setSearchLoading] = useState(false);
   const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
   const [markdown, setMarkdown] = useState<MarkdownState>({ kind: "idle" });
   const [markdownMode, setMarkdownMode] = useState<"preview" | "raw">("preview");
   const [dragActive, setDragActive] = useState(false);
 
   const apiOptions = useMemo<ApiOptions>(() => ({ apiKey: apiKey.trim() || undefined }), [apiKey]);
-  const selected = items.find((item) => item.library_item_id === selectedId) || null;
+  const selected = useMemo(() => {
+    const visibleItem = items.find((item) => item.library_item_id === selectedId);
+    if (visibleItem) return visibleItem;
+    if (selectedItem?.library_item_id === selectedId) return selectedItem;
+    return null;
+  }, [items, selectedId, selectedItem]);
   const previewObjectUrl = useRef<string | null>(null);
 
   const clearPreviewObjectUrl = useCallback(() => {
@@ -92,22 +105,86 @@ function App() {
         );
         setItems(response.items);
         setNotice(null);
-        const targetId = preferredId || selectedId;
-        if (targetId && response.items.some((item) => item.library_item_id === targetId)) {
+        const targetId = preferredId !== undefined ? preferredId : selectedId;
+        if (targetId) {
+          const visibleItem = response.items.find((item) => item.library_item_id === targetId);
           setSelectedId(targetId);
+          if (visibleItem) {
+            setSelectedItem(visibleItem);
+          } else if (selectedItem?.library_item_id !== targetId) {
+            setSelectedItem(await getLibraryItem(targetId, apiOptions));
+          }
         } else {
-          setSelectedId(response.items[0]?.library_item_id || null);
+          const nextItem = response.items[0] || null;
+          setSelectedId(nextItem?.library_item_id || null);
+          setSelectedItem(nextItem);
         }
       } catch (error) {
         setNotice(messageFromError(error));
       }
     },
-    [apiOptions, query, selectedId, statusFilter, typeFilter]
+    [apiOptions, query, selectedId, selectedItem?.library_item_id, statusFilter, typeFilter]
+  );
+
+  const selectLibraryItem = useCallback(
+    async (libraryItemId: string | null) => {
+      setSelectedId(libraryItemId);
+      if (!libraryItemId) {
+        setSelectedItem(null);
+        return;
+      }
+      const visibleItem = items.find((item) => item.library_item_id === libraryItemId);
+      if (visibleItem) {
+        setSelectedItem(visibleItem);
+        return;
+      }
+      try {
+        setSelectedItem(await getLibraryItem(libraryItemId, apiOptions));
+        setNotice(null);
+      } catch (error) {
+        setNotice(messageFromError(error));
+      }
+    },
+    [apiOptions, items]
   );
 
   useEffect(() => {
     refreshLibrary().catch(() => undefined);
   }, [query, statusFilter, typeFilter]);
+
+  useEffect(() => {
+    const trimmed = query.trim();
+    if (trimmed.length < 2) {
+      setSearchHits([]);
+      setSearchTotal(0);
+      setSearchLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setSearchLoading(true);
+    const timer = window.setTimeout(() => {
+      searchLibraryContent({ q: trimmed, detectedType: typeFilter, limit: 10, mode: searchMode }, apiOptions)
+        .then((response) => {
+          if (cancelled) return;
+          setSearchHits(response.hits);
+          setSearchTotal(response.total);
+          setNotice(null);
+        })
+        .catch((error) => {
+          if (cancelled) return;
+          setSearchHits([]);
+          setSearchTotal(0);
+          setNotice(messageFromError(error));
+        })
+        .finally(() => {
+          if (!cancelled) setSearchLoading(false);
+        });
+    }, 250);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [apiOptions, query, searchMode, typeFilter]);
 
   useEffect(() => {
     const timer = window.setInterval(() => {
@@ -243,6 +320,20 @@ function App() {
     }
   };
 
+  const handleReindexSearch = async () => {
+    try {
+      const response = await reindexSearch(apiOptions);
+      setNotice(`Search index updated: ${response.indexed} indexed, ${response.skipped} skipped.`);
+      if (query.trim().length >= 2) {
+        const data = await searchLibraryContent({ q: query.trim(), detectedType: typeFilter, limit: 10, mode: searchMode }, apiOptions);
+        setSearchHits(data.hits);
+        setSearchTotal(data.total);
+      }
+    } catch (error) {
+      setNotice(messageFromError(error));
+    }
+  };
+
   const copyMarkdown = async () => {
     if (markdown.kind !== "ready") return;
     await navigator.clipboard.writeText(markdown.markdown);
@@ -311,7 +402,7 @@ function App() {
 
         <div className="search-box">
           <Search size={16} />
-          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search" />
+          <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search files and text" />
         </div>
 
         <div className="filter-row">
@@ -341,12 +432,23 @@ function App() {
           </div>
         )}
 
+        <ContentSearchPanel
+          query={query}
+          hits={searchHits}
+          total={searchTotal}
+          loading={searchLoading}
+          mode={searchMode}
+          onModeChange={setSearchMode}
+          onSelect={(hit) => selectLibraryItem(hit.library_item_id).catch(() => undefined)}
+          onReindex={handleReindexSearch}
+        />
+
         <div className="file-list">
           {items.map((item) => (
             <button
               key={item.library_item_id}
               className={`file-row ${selectedId === item.library_item_id ? "selected" : ""}`}
-              onClick={() => setSelectedId(item.library_item_id)}
+              onClick={() => selectLibraryItem(item.library_item_id).catch(() => undefined)}
             >
               <FileGlyph type={item.detected_type} />
               <span className="file-main">
@@ -470,6 +572,84 @@ function App() {
         </div>
       )}
     </main>
+  );
+}
+
+function ContentSearchPanel({
+  query,
+  hits,
+  total,
+  loading,
+  mode,
+  onModeChange,
+  onSelect,
+  onReindex,
+}: {
+  query: string;
+  hits: SearchHit[];
+  total: number;
+  loading: boolean;
+  mode: "hybrid" | "keyword" | "semantic";
+  onModeChange: (mode: "hybrid" | "keyword" | "semantic") => void;
+  onSelect: (hit: SearchHit) => void;
+  onReindex: () => void;
+}) {
+  const active = query.trim().length >= 2;
+  if (!active) {
+    return (
+      <div className="content-search compact">
+        <div>
+          <strong>Content search</strong>
+          <span>Search converted Markdown across the library.</span>
+        </div>
+        <button className="mini-button" onClick={onReindex}>Index existing</button>
+      </div>
+    );
+  }
+  return (
+    <div className="content-search">
+      <div className="content-search-head">
+        <div>
+          <strong>Content matches</strong>
+          <span>{loading ? "Searching..." : `${total} result${total === 1 ? "" : "s"}`}</span>
+        </div>
+        <select value={mode} onChange={(event) => onModeChange(event.target.value as typeof mode)}>
+          <option value="hybrid">Hybrid</option>
+          <option value="keyword">Keyword</option>
+          <option value="semantic">Semantic</option>
+        </select>
+        <button className="mini-button" onClick={onReindex}>Reindex</button>
+      </div>
+      <div className="content-search-results">
+        {hits.map((hit) => (
+          <button key={`${hit.library_item_id}-${hit.asset_id}`} className="search-hit" onClick={() => onSelect(hit)}>
+            <span className="search-hit-title">{hit.filename}</span>
+            <Snippet text={hit.snippet} />
+          </button>
+        ))}
+        {!loading && hits.length === 0 && <div className="search-empty">No content matches</div>}
+      </div>
+    </div>
+  );
+}
+
+function Snippet({ text }: { text: string }) {
+  const parts = text.split(/(<mark>|<\/mark>)/g);
+  let marked = false;
+  return (
+    <span className="search-snippet">
+      {parts.map((part, index) => {
+        if (part === "<mark>") {
+          marked = true;
+          return null;
+        }
+        if (part === "</mark>") {
+          marked = false;
+          return null;
+        }
+        return marked ? <mark key={index}>{part}</mark> : <React.Fragment key={index}>{part}</React.Fragment>;
+      })}
+    </span>
   );
 }
 

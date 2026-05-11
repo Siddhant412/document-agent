@@ -152,6 +152,36 @@ class LibraryMarkdownResponse(BaseModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class SearchHitResponse(BaseModel):
+    library_item_id: UUID
+    job_id: UUID
+    asset_id: UUID
+    filename: str
+    detected_type: Optional[str] = None
+    score: float
+    keyword_score: float = 0.0
+    semantic_score: float = 0.0
+    chunk_index: Optional[int] = None
+    snippet: str
+    markdown_url: str
+    preview_url: str
+    processed_at: Optional[datetime] = None
+
+
+class SearchResponse(BaseModel):
+    query: str
+    hits: List[SearchHitResponse]
+    limit: int
+    offset: int
+    total: int
+
+
+class SearchReindexResponse(BaseModel):
+    indexed: int
+    skipped: int
+    limit: int
+
+
 class ReprocessResponse(UrlsMixin):
     library_item_id: UUID
     job_id: UUID

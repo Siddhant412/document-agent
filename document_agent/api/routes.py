@@ -21,6 +21,9 @@ from document_agent.api.schemas import (
     LibraryListResponse,
     LibraryMarkdownResponse,
     ReprocessResponse,
+    SearchHitResponse,
+    SearchReindexResponse,
+    SearchResponse,
 )
 from document_agent.api.sse import events_response
 from document_agent.api.uploads import StagedUpload, parse_metadata_json, stage_upload, staged_jobs_payload
@@ -33,6 +36,8 @@ from document_agent.batches.manifest import (
 from document_agent.config import Settings, get_settings
 from document_agent.db.repository import Repository
 from document_agent.metrics import BATCHES_CREATED, JOBS_CREATED
+from document_agent.search.engine import DocumentSearchEngine
+from document_agent.search.models import SearchQuery
 from document_agent.status import TERMINAL_BATCH_STATUSES, batch_percent_from_jobs
 from document_agent.storage import ObjectStore
 
@@ -45,6 +50,13 @@ def get_repository() -> Repository:
 
 def get_object_store() -> ObjectStore:
     return ObjectStore()
+
+
+def get_search_engine(
+    repository: Repository = Depends(get_repository),
+    object_store: ObjectStore = Depends(get_object_store),
+) -> DocumentSearchEngine:
+    return DocumentSearchEngine(repository, object_store)
 
 
 def _base(settings: Settings) -> str:
@@ -414,6 +426,65 @@ def list_library(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/v1/search", response_model=SearchResponse)
+def search_library(
+    q: str = Query(..., min_length=1, description="Text to search for in converted Markdown."),
+    limit: int = Query(default=20, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
+    detected_type: Optional[str] = Query(default=None),
+    library_item_id: Optional[UUID] = Query(default=None),
+    mode: str = Query(default="hybrid", pattern="^(keyword|semantic|hybrid)$"),
+    search_engine: DocumentSearchEngine = Depends(get_search_engine),
+) -> SearchResponse:
+    response = search_engine.search(
+        SearchQuery(
+            query=q,
+            limit=limit,
+            offset=offset,
+            detected_type=detected_type,
+            library_item_id=library_item_id,
+            mode=mode,
+        )
+    )
+    return SearchResponse(
+        query=response.query,
+        limit=response.limit,
+        offset=response.offset,
+        total=response.total,
+        hits=[
+            SearchHitResponse(
+                library_item_id=hit.library_item_id,
+                job_id=hit.job_id,
+                asset_id=hit.asset_id,
+                filename=hit.filename,
+                detected_type=hit.detected_type,
+                score=hit.score,
+                keyword_score=hit.keyword_score,
+                semantic_score=hit.semantic_score,
+                chunk_index=hit.chunk_index,
+                snippet=hit.snippet,
+                markdown_url=hit.markdown_url,
+                preview_url=hit.preview_url,
+                processed_at=hit.processed_at,
+            )
+            for hit in response.hits
+        ],
+    )
+
+
+@router.post("/v1/search/reindex", response_model=SearchReindexResponse)
+def reindex_search(
+    limit: int = Query(default=500, ge=1, le=5000),
+    only_missing: bool = Query(default=True),
+    search_engine: DocumentSearchEngine = Depends(get_search_engine),
+) -> SearchReindexResponse:
+    indexed, skipped = search_engine.reindex_existing_markdown(
+        limit=limit,
+        only_missing=only_missing,
+    )
+    return SearchReindexResponse(indexed=indexed, skipped=skipped, limit=limit)
 
 
 @router.get("/v1/library/{library_item_id}", response_model=LibraryItemResponse)
