@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import datetime as dt
 from typing import Dict, Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 
 from document_agent.api.schemas import (
     ObservabilityErrorsResponse,
@@ -15,15 +16,41 @@ from document_agent.logging_config import get_ring_buffer
 
 observability_router = APIRouter(prefix="/v1/observability", tags=["observability"])
 
+TIME_RANGES: Dict[str, Optional[int]] = {
+    "1h": 60 * 60,
+    "6h": 6 * 60 * 60,
+    "24h": 24 * 60 * 60,
+    "7d": 7 * 24 * 60 * 60,
+    "30d": 30 * 24 * 60 * 60,
+    "all": None,
+}
+
 
 def _get_repo() -> Repository:
     from document_agent.db.connection import get_pool
     return Repository(get_pool())
 
 
+def _range_seconds(time_range: str) -> Optional[int]:
+    if time_range not in TIME_RANGES:
+        allowed = ", ".join(TIME_RANGES)
+        raise HTTPException(status_code=400, detail=f"Invalid time_range. Use one of: {allowed}.")
+    return TIME_RANGES[time_range]
+
+
+def _range_start(time_range: str) -> Optional[dt.datetime]:
+    seconds = _range_seconds(time_range)
+    if seconds is None:
+        return None
+    return dt.datetime.now(dt.UTC) - dt.timedelta(seconds=seconds)
+
+
 @observability_router.get("/stats", response_model=ObservabilityStatsResponse)
-def get_stats(repo: Repository = Depends(_get_repo)) -> ObservabilityStatsResponse:
-    data = repo.get_observability_stats()
+def get_stats(
+    time_range: str = Query(default="24h", description="One of: 1h, 6h, 24h, 7d, 30d, all"),
+    repo: Repository = Depends(_get_repo),
+) -> ObservabilityStatsResponse:
+    data = repo.get_observability_stats(range_seconds=_range_seconds(time_range))
 
     jobs_by_status: Dict[str, int] = {row["status"]: int(row["count"]) for row in data["status_counts"]}
     total_jobs = sum(jobs_by_status.values())
@@ -72,6 +99,7 @@ def get_events(
     since_id: Optional[int] = Query(default=None),
     event_type: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
+    time_range: str = Query(default="24h", description="One of: 1h, 6h, 24h, 7d, 30d, all"),
     repo: Repository = Depends(_get_repo),
 ) -> ObservabilityEventsResponse:
     rows = repo.get_global_events(
@@ -80,6 +108,7 @@ def get_events(
         since_id=since_id,
         event_type=event_type,
         q=q,
+        range_seconds=_range_seconds(time_range),
     )
 
     if since_id is not None:
@@ -96,9 +125,15 @@ def get_errors(
     limit: int = Query(default=20, ge=1, le=100),
     error_code: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
+    time_range: str = Query(default="24h", description="One of: 1h, 6h, 24h, 7d, 30d, all"),
     repo: Repository = Depends(_get_repo),
 ) -> ObservabilityErrorsResponse:
-    result = repo.get_recent_errors(limit=limit, error_code=error_code, q=q)
+    result = repo.get_recent_errors(
+        limit=limit,
+        error_code=error_code,
+        q=q,
+        range_seconds=_range_seconds(time_range),
+    )
     return ObservabilityErrorsResponse(**result)
 
 
@@ -108,9 +143,16 @@ def get_logs(
     level: Optional[str] = Query(default=None),
     q: Optional[str] = Query(default=None),
     since_seq: int = Query(default=0, ge=0),
+    time_range: str = Query(default="24h", description="One of: 1h, 6h, 24h, 7d, 30d, all"),
 ) -> ObservabilityLogsResponse:
     ring = get_ring_buffer()
-    records = ring.get_records(limit=limit, level=level, q=q, since_seq=since_seq)
+    records = ring.get_records(
+        limit=limit,
+        level=level,
+        q=q,
+        since_seq=since_seq,
+        since_ts=_range_start(time_range),
+    )
     stats = ring.stats()
     return ObservabilityLogsResponse(
         logs=records,

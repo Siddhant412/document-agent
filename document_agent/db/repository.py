@@ -1757,13 +1757,42 @@ class Repository:
     # Observability queries
     # ------------------------------------------------------------------
 
-    def get_observability_stats(self) -> Dict[str, Any]:
+    def get_observability_stats(self, *, range_seconds: Optional[int] = 86400) -> Dict[str, Any]:
+        job_time_clause = ""
+        job_time_params: List[Any] = []
+        batch_time_clause = ""
+        batch_time_params: List[Any] = []
+        if range_seconds is not None:
+            job_time_clause = (
+                "WHERE COALESCE(finished_at, cancelled_at, started_at, created_at) "
+                ">= now() - (%s * interval '1 second')"
+            )
+            job_time_params.append(int(range_seconds))
+            batch_time_clause = (
+                "WHERE COALESCE(finished_at, created_at) "
+                ">= now() - (%s * interval '1 second')"
+            )
+            batch_time_params.append(int(range_seconds))
+
+        duration_time_clause = ""
+        duration_time_params: List[Any] = []
+        if range_seconds is not None:
+            duration_time_clause = "AND finished_at >= now() - (%s * interval '1 second')"
+            duration_time_params.append(int(range_seconds))
+
+        throughput_time_clause = ""
+        throughput_time_params: List[Any] = []
+        if range_seconds is not None:
+            throughput_time_clause = "AND finished_at >= now() - (%s * interval '1 second')"
+            throughput_time_params.append(int(range_seconds))
+
         with self.pool.connection() as conn:
             status_rows = conn.execute(
-                "SELECT status, COUNT(*) AS count FROM document_jobs GROUP BY status"
+                f"SELECT status, COUNT(*) AS count FROM document_jobs {job_time_clause} GROUP BY status",
+                tuple(job_time_params),
             ).fetchall()
             duration_row = conn.execute(
-                """
+                f"""
                 SELECT
                   AVG(EXTRACT(EPOCH FROM (finished_at - started_at))) AS avg_seconds,
                   PERCENTILE_CONT(0.95) WITHIN GROUP (
@@ -1773,21 +1802,28 @@ class Repository:
                 WHERE status = 'succeeded'
                   AND started_at IS NOT NULL
                   AND finished_at IS NOT NULL
-                """
+                  {duration_time_clause}
+                """,
+                tuple(duration_time_params),
             ).fetchone()
             throughput_rows = conn.execute(
-                """
+                f"""
                 SELECT date_trunc('hour', finished_at) AS hour, status, COUNT(*) AS count
                 FROM document_jobs
                 WHERE status IN ('succeeded', 'failed')
-                  AND finished_at >= now() - interval '24 hours'
+                  {throughput_time_clause}
                 GROUP BY 1, 2 ORDER BY 1 ASC
-                """
+                """,
+                tuple(throughput_time_params),
             ).fetchall()
             type_rows = conn.execute(
-                "SELECT detected_type, COUNT(*) AS count FROM document_jobs GROUP BY 1 ORDER BY 2 DESC"
+                f"SELECT detected_type, COUNT(*) AS count FROM document_jobs {job_time_clause} GROUP BY 1 ORDER BY 2 DESC",
+                tuple(job_time_params),
             ).fetchall()
-            batch_row = conn.execute("SELECT COUNT(*) AS total FROM document_batches").fetchone()
+            batch_row = conn.execute(
+                f"SELECT COUNT(*) AS total FROM document_batches {batch_time_clause}",
+                tuple(batch_time_params),
+            ).fetchone()
             lease_row = conn.execute(
                 "SELECT COUNT(*) AS active FROM document_jobs WHERE status = 'running' AND lease_expires_at > now()"
             ).fetchone()
@@ -1808,10 +1844,14 @@ class Repository:
         since_id: Optional[int] = None,
         event_type: Optional[str] = None,
         q: Optional[str] = None,
+        range_seconds: Optional[int] = 86400,
     ) -> List[Dict[str, Any]]:
         if since_id is not None:
             clauses: List[str] = ["id > %s"]
             params: List[Any] = [int(since_id)]
+            if range_seconds is not None:
+                clauses.append("created_at >= now() - (%s * interval '1 second')")
+                params.append(int(range_seconds))
             if event_type:
                 clauses.append("event_type = %s")
                 params.append(event_type)
@@ -1828,6 +1868,9 @@ class Repository:
 
         clauses = []
         params = []
+        if range_seconds is not None:
+            clauses.append("created_at >= now() - (%s * interval '1 second')")
+            params.append(int(range_seconds))
         if before_id is not None:
             clauses.append("id < %s")
             params.append(int(before_id))
@@ -1852,9 +1895,15 @@ class Repository:
         limit: int = 20,
         error_code: Optional[str] = None,
         q: Optional[str] = None,
+        range_seconds: Optional[int] = 86400,
     ) -> Dict[str, Any]:
         clauses = ["status IN ('failed', 'cancelled')", "error_code IS NOT NULL"]
         params: List[Any] = []
+        if range_seconds is not None:
+            clauses.append(
+                "COALESCE(finished_at, cancelled_at, started_at, created_at) >= now() - (%s * interval '1 second')"
+            )
+            params.append(int(range_seconds))
         if error_code:
             clauses.append("error_code = %s")
             params.append(error_code)
@@ -1877,15 +1926,17 @@ class Repository:
                 tuple(params),
             ).fetchall()
             dist_rows = conn.execute(
-                """
+                f"""
                 SELECT error_code, COUNT(*) AS count
                 FROM document_jobs
-                WHERE status IN ('failed', 'cancelled') AND error_code IS NOT NULL
+                WHERE {where}
                 GROUP BY 1 ORDER BY 2 DESC
-                """
+                """,
+                tuple(params[:-1]),
             ).fetchall()
             total_row = conn.execute(
-                "SELECT COUNT(*) AS n FROM document_jobs WHERE status IN ('failed', 'cancelled')"
+                f"SELECT COUNT(*) AS n FROM document_jobs WHERE {where}",
+                tuple(params[:-1]),
             ).fetchone()
         return {
             "errors": [dict(r) for r in error_rows],

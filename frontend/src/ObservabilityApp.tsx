@@ -44,6 +44,7 @@ import {
   ObsLogRecord,
   ObsLogsResponse,
   ObsStatsResponse,
+  ObsTimeRange,
   fetchObsErrors,
   fetchObsEvents,
   fetchObsLogs,
@@ -67,6 +68,16 @@ const REFRESH_LABELS: Record<RefreshInterval, string> = {
   5: "5 s",
   15: "15 s",
   30: "30 s",
+};
+
+const TIME_RANGES: ObsTimeRange[] = ["1h", "6h", "24h", "7d", "30d", "all"];
+const TIME_RANGE_LABELS: Record<ObsTimeRange, string> = {
+  "1h": "Last 1 hour",
+  "6h": "Last 6 hours",
+  "24h": "Last 24 hours",
+  "7d": "Last 7 days",
+  "30d": "Last 30 days",
+  all: "All time",
 };
 
 const PIE_COLORS = ["#2563eb", "#16a34a", "#dc2626", "#d97706", "#7c3aed", "#0891b2", "#db2777"];
@@ -102,14 +113,22 @@ function useLocalStorage(key: string, initial: string) {
   return [value, update] as const;
 }
 
-function fmtHour(iso: string) {
+function fmtTimeBucket(iso: string, range: ObsTimeRange) {
   try {
     const d = new Date(iso);
-    return `${d.getHours().toString().padStart(2, "0")}:00`;
+    if (range === "1h" || range === "6h" || range === "24h") {
+      return `${d.getHours().toString().padStart(2, "0")}:00`;
+    }
+    return d.toLocaleString(undefined, {
+      month: "short",
+      day: "numeric",
+      hour: "2-digit",
+    });
   } catch {
     return iso;
   }
 }
+
 
 function fmtTs(iso: string) {
   try {
@@ -132,6 +151,10 @@ function fmtDuration(sec: number | null) {
   return `${(sec / 60).toFixed(1)} min`;
 }
 
+function normalizeTimeRange(value: string): ObsTimeRange {
+  return TIME_RANGES.includes(value as ObsTimeRange) ? (value as ObsTimeRange) : "24h";
+}
+
 // ---------------------------------------------------------------------------
 // Top-level component
 // ---------------------------------------------------------------------------
@@ -140,6 +163,11 @@ export function ObservabilityApp() {
   const [tab, setTab] = useState<Tab>("overview");
   const [refreshInterval, setRefreshInterval] = useState<RefreshInterval>(15);
   const [apiKey] = useLocalStorage("document-agent-api-key", "");
+  const [storedTimeRange, setStoredTimeRange] = useLocalStorage(
+    "document-agent-observability-time-range",
+    "24h"
+  );
+  const timeRange = normalizeTimeRange(storedTimeRange);
 
   const apiOptions = useMemo<ApiOptions>(() => ({ apiKey: apiKey.trim() || undefined }), [apiKey]);
 
@@ -179,19 +207,49 @@ export function ObservabilityApp() {
           <span>{REFRESH_LABELS[refreshInterval]}</span>
           <ChevronDown size={12} />
         </button>
+        <label className="obs-time-range">
+          <Clock size={14} />
+          <select
+            value={timeRange}
+            onChange={(e) => setStoredTimeRange(normalizeTimeRange(e.target.value))}
+            title="Observability time range"
+          >
+            {TIME_RANGES.map((range) => (
+              <option key={range} value={range}>
+                {TIME_RANGE_LABELS[range]}
+              </option>
+            ))}
+          </select>
+        </label>
       </header>
       <div className="obs-body">
         {tab === "overview" && (
-          <OverviewSection apiOptions={apiOptions} refreshInterval={refreshInterval} />
+          <OverviewSection
+            apiOptions={apiOptions}
+            refreshInterval={refreshInterval}
+            timeRange={timeRange}
+          />
         )}
         {tab === "events" && (
-          <EventsSection apiOptions={apiOptions} refreshInterval={refreshInterval} />
+          <EventsSection
+            apiOptions={apiOptions}
+            refreshInterval={refreshInterval}
+            timeRange={timeRange}
+          />
         )}
         {tab === "logs" && (
-          <LogsSection apiOptions={apiOptions} refreshInterval={refreshInterval} />
+          <LogsSection
+            apiOptions={apiOptions}
+            refreshInterval={refreshInterval}
+            timeRange={timeRange}
+          />
         )}
         {tab === "metrics" && (
-          <MetricsSection apiOptions={apiOptions} refreshInterval={refreshInterval} />
+          <MetricsSection
+            apiOptions={apiOptions}
+            refreshInterval={refreshInterval}
+            timeRange={timeRange}
+          />
         )}
       </div>
     </div>
@@ -205,9 +263,11 @@ export function ObservabilityApp() {
 function OverviewSection({
   apiOptions,
   refreshInterval,
+  timeRange,
 }: {
   apiOptions: ApiOptions;
   refreshInterval: RefreshInterval;
+  timeRange: ObsTimeRange;
 }) {
   const [stats, setStats] = useState<ObsStatsResponse | null>(null);
   const [loading, setLoading] = useState(true);
@@ -215,7 +275,7 @@ function OverviewSection({
 
   const load = useCallback(async () => {
     try {
-      const data = await fetchObsStats(apiOptions);
+      const data = await fetchObsStats(apiOptions, timeRange);
       setStats(data);
       setError(null);
     } catch (e) {
@@ -223,7 +283,7 @@ function OverviewSection({
     } finally {
       setLoading(false);
     }
-  }, [apiOptions]);
+  }, [apiOptions, timeRange]);
 
   useEffect(() => {
     load();
@@ -242,12 +302,13 @@ function OverviewSection({
   const failed = stats.jobs_by_status["failed"] ?? 0;
   const throughputData = stats.throughput_by_hour.map((r) => ({
     ...r,
-    hour: fmtHour(r.hour),
+    hour: fmtTimeBucket(r.hour, timeRange),
   }));
   const typeData = stats.jobs_by_type.map((r) => ({
     name: r.detected_type ? r.detected_type.toUpperCase() : "UNKNOWN",
     value: r.count,
   }));
+  const rangeLabel = TIME_RANGE_LABELS[timeRange].toLowerCase();
 
   return (
     <div className="obs-overview">
@@ -284,9 +345,9 @@ function OverviewSection({
 
       <div className="obs-chart-row">
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Job throughput — last 24 h</div>
+          <div className="obs-chart-title">Job throughput — {rangeLabel}</div>
           {throughputData.length === 0 ? (
-            <EmptyChartNote>No jobs in the last 24 hours</EmptyChartNote>
+            <EmptyChartNote>No jobs in {rangeLabel}</EmptyChartNote>
           ) : (
             <ResponsiveContainer width="100%" height={220}>
               <BarChart data={throughputData} margin={{ top: 8, right: 16, bottom: 0, left: 0 }}>
@@ -305,7 +366,7 @@ function OverviewSection({
         </div>
 
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Jobs by file type</div>
+          <div className="obs-chart-title">Jobs by file type — {rangeLabel}</div>
           {typeData.length === 0 ? (
             <EmptyChartNote>No jobs yet</EmptyChartNote>
           ) : (
@@ -398,9 +459,11 @@ function EmptyChartNote({ children }: { children: React.ReactNode }) {
 function EventsSection({
   apiOptions,
   refreshInterval,
+  timeRange,
 }: {
   apiOptions: ApiOptions;
   refreshInterval: RefreshInterval;
+  timeRange: ObsTimeRange;
 }) {
   const [events, setEvents] = useState<ObsEventRow[]>([]);
   const [hasMore, setHasMore] = useState(false);
@@ -418,20 +481,21 @@ function EventsSection({
     setLoading(true);
     try {
       const resp = await fetchObsEvents(
-        { limit: 50, event_type: eventType || undefined, q: q || undefined },
+        { limit: 50, event_type: eventType || undefined, q: q || undefined, timeRange },
         apiOptions
       );
       setEvents(resp.events);
       setHasMore(resp.has_more);
       setNextBeforeId(resp.next_before_id ?? null);
       setMaxId(resp.events[0]?.id ?? 0);
+      setNewCount(0);
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Failed to load events");
     } finally {
       setLoading(false);
     }
-  }, [apiOptions, eventType, q]);
+  }, [apiOptions, eventType, q, timeRange]);
 
   useEffect(() => {
     load();
@@ -444,7 +508,7 @@ function EventsSection({
       if (maxId === 0) return;
       try {
         const resp = await fetchObsEvents(
-          { since_id: maxId, event_type: eventType || undefined, q: q || undefined },
+          { since_id: maxId, event_type: eventType || undefined, q: q || undefined, timeRange },
           apiOptions
         );
         if (resp.events.length > 0) {
@@ -461,14 +525,20 @@ function EventsSection({
       }
     }, refreshInterval * 1000);
     return () => window.clearInterval(timer);
-  }, [apiOptions, eventType, maxId, q, refreshInterval]);
+  }, [apiOptions, eventType, maxId, q, refreshInterval, timeRange]);
 
   const loadMore = async () => {
     if (!nextBeforeId) return;
     setLoadingMore(true);
     try {
       const resp = await fetchObsEvents(
-        { limit: 50, before_id: nextBeforeId, event_type: eventType || undefined, q: q || undefined },
+        {
+          limit: 50,
+          before_id: nextBeforeId,
+          event_type: eventType || undefined,
+          q: q || undefined,
+          timeRange,
+        },
         apiOptions
       );
       setEvents((prev) => [...prev, ...resp.events]);
@@ -516,6 +586,7 @@ function EventsSection({
             )
           )}
         </select>
+        <span className="obs-range-note">{TIME_RANGE_LABELS[timeRange]}</span>
       </div>
 
       {newCount > 0 && (
@@ -592,9 +663,11 @@ function EventRow({ event }: { event: ObsEventRow }) {
 function LogsSection({
   apiOptions,
   refreshInterval,
+  timeRange,
 }: {
   apiOptions: ApiOptions;
   refreshInterval: RefreshInterval;
+  timeRange: ObsTimeRange;
 }) {
   const [logs, setLogs] = useState<ObsLogRecord[]>([]);
   const [maxSeq, setMaxSeq] = useState(0);
@@ -610,7 +683,7 @@ function LogsSection({
     setLoading(true);
     try {
       const resp = await fetchObsLogs(
-        { limit: 200, level: level || undefined, q: q || undefined },
+        { limit: 200, level: level || undefined, q: q || undefined, timeRange },
         apiOptions
       );
       setLogs(resp.logs);
@@ -622,7 +695,7 @@ function LogsSection({
     } finally {
       setLoading(false);
     }
-  }, [apiOptions, level, q]);
+  }, [apiOptions, level, q, timeRange]);
 
   useEffect(() => {
     load();
@@ -639,6 +712,7 @@ function LogsSection({
             level: level || undefined,
             q: q || undefined,
             since_seq: maxSeq,
+            timeRange,
           },
           apiOptions
         );
@@ -660,7 +734,7 @@ function LogsSection({
       }
     }, refreshInterval * 1000);
     return () => window.clearInterval(timer);
-  }, [apiOptions, level, maxSeq, q, refreshInterval]);
+  }, [apiOptions, level, maxSeq, q, refreshInterval, timeRange]);
 
   const handleScroll = () => {
     const el = viewerRef.current;
@@ -696,10 +770,12 @@ function LogsSection({
             </button>
           )}
         </div>
+        <span className="obs-range-note">{TIME_RANGE_LABELS[timeRange]}</span>
       </div>
 
       <div className="obs-buf-stats">
-        Buffer: {bufStats.used} / {bufStats.capacity} records &nbsp;·&nbsp; Showing {logs.length}
+        Buffer: {bufStats.used} / {bufStats.capacity} records &nbsp;·&nbsp; Showing {logs.length} in{" "}
+        {TIME_RANGE_LABELS[timeRange].toLowerCase()}
         {refreshInterval > 0 && <span className="obs-live-dot" title="Live polling active" />}
       </div>
 
@@ -737,9 +813,11 @@ function LogLine({ record }: { record: ObsLogRecord }) {
 function MetricsSection({
   apiOptions,
   refreshInterval,
+  timeRange,
 }: {
   apiOptions: ApiOptions;
   refreshInterval: RefreshInterval;
+  timeRange: ObsTimeRange;
 }) {
   const [stats, setStats] = useState<ObsStatsResponse | null>(null);
   const [errors, setErrors] = useState<ObsErrorsResponse | null>(null);
@@ -749,8 +827,8 @@ function MetricsSection({
   const load = useCallback(async () => {
     try {
       const [s, e] = await Promise.all([
-        fetchObsStats(apiOptions),
-        fetchObsErrors({ limit: 100 }, apiOptions),
+        fetchObsStats(apiOptions, timeRange),
+        fetchObsErrors({ limit: 100, timeRange }, apiOptions),
       ]);
       setStats(s);
       setErrors(e);
@@ -760,7 +838,7 @@ function MetricsSection({
     } finally {
       setLoading(false);
     }
-  }, [apiOptions]);
+  }, [apiOptions, timeRange]);
 
   useEffect(() => {
     load();
@@ -778,7 +856,7 @@ function MetricsSection({
 
   const throughputData = stats.throughput_by_hour.map((r) => ({
     ...r,
-    hour: fmtHour(r.hour),
+    hour: fmtTimeBucket(r.hour, timeRange),
   }));
 
   const statusData = Object.entries(stats.jobs_by_status).map(([status, count]) => ({
@@ -787,7 +865,7 @@ function MetricsSection({
   }));
 
   const errorRateData = stats.throughput_by_hour.map((r) => ({
-    hour: fmtHour(r.hour),
+    hour: fmtTimeBucket(r.hour, timeRange),
     total: (r.succeeded ?? 0) + (r.failed ?? 0),
     failed: r.failed ?? 0,
     rate:
@@ -801,11 +879,12 @@ function MetricsSection({
     count: r.count,
     avg: stats.avg_duration_seconds ?? 0,
   }));
+  const rangeLabel = TIME_RANGE_LABELS[timeRange].toLowerCase();
 
   return (
     <div className="obs-chart-grid">
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Throughput — last 24 h</div>
+          <div className="obs-chart-title">Throughput — {rangeLabel}</div>
           {throughputData.length === 0 ? (
             <EmptyChartNote>No data</EmptyChartNote>
           ) : (
@@ -850,7 +929,7 @@ function MetricsSection({
         </div>
 
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Jobs by status</div>
+          <div className="obs-chart-title">Jobs by status — {rangeLabel}</div>
           {statusData.length === 0 ? (
             <EmptyChartNote>No data</EmptyChartNote>
           ) : (
@@ -887,7 +966,7 @@ function MetricsSection({
         </div>
 
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Error rate (%) — last 24 h</div>
+          <div className="obs-chart-title">Error rate (%) — {rangeLabel}</div>
           {errorRateData.length === 0 ? (
             <EmptyChartNote>No data</EmptyChartNote>
           ) : (
@@ -912,7 +991,7 @@ function MetricsSection({
         </div>
 
         <div className="obs-chart-card">
-          <div className="obs-chart-title">Top error codes</div>
+          <div className="obs-chart-title">Top error codes — {rangeLabel}</div>
           {errors.error_code_counts.length === 0 ? (
             <EmptyChartNote>No errors recorded</EmptyChartNote>
           ) : (
@@ -940,7 +1019,7 @@ function MetricsSection({
         </div>
 
         <div className="obs-chart-card obs-duration-card">
-          <div className="obs-chart-title">Duration stats</div>
+          <div className="obs-chart-title">Duration stats — {rangeLabel}</div>
           <div className="obs-duration-stats">
             <div className="obs-dur-row">
               <span className="obs-dur-label">Avg duration</span>

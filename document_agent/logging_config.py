@@ -39,6 +39,7 @@ class RingBufferHandler(logging.Handler):
         level: Optional[str] = None,
         q: Optional[str] = None,
         since_seq: int = 0,
+        since_ts: Optional[dt.datetime] = None,
     ) -> List[dict]:
         _order = {"DEBUG": 10, "INFO": 20, "WARNING": 30, "ERROR": 40, "CRITICAL": 50}
         min_lvl = _order.get((level or "").upper(), 0)
@@ -49,6 +50,13 @@ class RingBufferHandler(logging.Handler):
         for rec in reversed(snapshot):
             if rec["seq"] <= since_seq:
                 continue
+            if since_ts is not None:
+                try:
+                    rec_ts = dt.datetime.fromisoformat(rec["ts"])
+                except ValueError:
+                    rec_ts = None
+                if rec_ts is not None and rec_ts < since_ts:
+                    continue
             if min_lvl and _order.get(rec["level"], 0) < min_lvl:
                 continue
             if q_lower and q_lower not in rec["message"].lower() and q_lower not in rec["logger"].lower():

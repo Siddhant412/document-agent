@@ -256,6 +256,8 @@ export interface ObsStatsResponse {
   health: Record<string, string>;
 }
 
+export type ObsTimeRange = "1h" | "6h" | "24h" | "7d" | "30d" | "all";
+
 export interface ObsEventRow {
   id: number;
   library_item_id: string | null;
@@ -307,15 +309,27 @@ export interface ObsLogsResponse {
   buffer_used: number;
 }
 
-export async function fetchObsStats(options: ApiOptions): Promise<ObsStatsResponse> {
-  return apiJson<ObsStatsResponse>("/v1/observability/stats", { method: "GET" }, options);
+export async function fetchObsStats(
+  options: ApiOptions,
+  timeRange: ObsTimeRange = "24h"
+): Promise<ObsStatsResponse> {
+  const query = new URLSearchParams({ time_range: timeRange });
+  return apiJson<ObsStatsResponse>(`/v1/observability/stats?${query}`, { method: "GET" }, options);
 }
 
 export async function fetchObsEvents(
-  params: { limit?: number; before_id?: number; since_id?: number; event_type?: string; q?: string },
+  params: {
+    limit?: number;
+    before_id?: number;
+    since_id?: number;
+    event_type?: string;
+    q?: string;
+    timeRange?: ObsTimeRange;
+  },
   options: ApiOptions
 ): Promise<ObsEventsResponse> {
   const query = new URLSearchParams();
+  query.set("time_range", params.timeRange ?? "24h");
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.before_id != null) query.set("before_id", String(params.before_id));
   if (params.since_id != null) query.set("since_id", String(params.since_id));
@@ -325,10 +339,11 @@ export async function fetchObsEvents(
 }
 
 export async function fetchObsErrors(
-  params: { limit?: number; error_code?: string; q?: string },
+  params: { limit?: number; error_code?: string; q?: string; timeRange?: ObsTimeRange },
   options: ApiOptions
 ): Promise<ObsErrorsResponse> {
   const query = new URLSearchParams();
+  query.set("time_range", params.timeRange ?? "24h");
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.error_code) query.set("error_code", params.error_code);
   if (params.q) query.set("q", params.q);
@@ -336,10 +351,11 @@ export async function fetchObsErrors(
 }
 
 export async function fetchObsLogs(
-  params: { limit?: number; level?: string; q?: string; since_seq?: number },
+  params: { limit?: number; level?: string; q?: string; since_seq?: number; timeRange?: ObsTimeRange },
   options: ApiOptions
 ): Promise<ObsLogsResponse> {
   const query = new URLSearchParams();
+  query.set("time_range", params.timeRange ?? "24h");
   if (params.limit != null) query.set("limit", String(params.limit));
   if (params.level) query.set("level", params.level);
   if (params.q) query.set("q", params.q);

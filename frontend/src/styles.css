@@ -910,6 +910,29 @@ button {
   color: #2563eb;
 }
 
+.obs-time-range {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 32px;
+  padding: 0 9px;
+  border: 1px solid #d3dae6;
+  border-radius: 7px;
+  background: #ffffff;
+  color: #475569;
+  flex-shrink: 0;
+}
+
+.obs-time-range select {
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: #1f2937;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
 /* Body */
 .obs-body {
   min-height: 0;
@@ -1112,6 +1135,13 @@ button {
   padding: 0 10px;
   font-size: 13px;
   flex-shrink: 0;
+}
+
+.obs-range-note {
+  color: #64748b;
+  font-size: 12px;
+  font-weight: 700;
+  white-space: nowrap;
 }
 
 /* ---- Events section ---- */
@@ -1497,6 +1527,12 @@ button {
   .obs-tab {
     padding: 0 10px;
     font-size: 12px;
+  }
+  .obs-time-range {
+    padding: 0 6px;
+  }
+  .obs-time-range select {
+    max-width: 98px;
   }
   .obs-overview {
     padding: 12px;
