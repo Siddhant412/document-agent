@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { createRoot } from "react-dom/client";
 import ReactMarkdown from "react-markdown";
+import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import {
   Activity,
@@ -57,8 +58,44 @@ type MarkdownState =
   | { kind: "error"; message: string }
   | { kind: "ready"; markdown: string };
 
+type SearchFocus = {
+  query: string;
+  hit: SearchHit;
+};
+
+type HighlightSpec = {
+  exactTerms: string[];
+  contextTerms: string[];
+  key: string;
+};
+
 const TYPE_FILTERS = ["all", "pdf", "docx", "doc", "txt", "png", "jpg", "jpeg", "heic"];
 const STATUS_FILTERS = ["all", "queued", "running", "succeeded", "failed", "cancelled"];
+const SEARCH_HIGHLIGHT_STOPWORDS = new Set([
+  "about",
+  "after",
+  "again",
+  "among",
+  "because",
+  "before",
+  "being",
+  "between",
+  "could",
+  "document",
+  "figure",
+  "generated",
+  "having",
+  "should",
+  "their",
+  "there",
+  "these",
+  "those",
+  "through",
+  "using",
+  "where",
+  "which",
+  "would",
+]);
 
 function App() {
   const [items, setItems] = useState<LibraryItem[]>([]);
@@ -75,6 +112,7 @@ function App() {
   const [searchHits, setSearchHits] = useState<SearchHit[]>([]);
   const [searchTotal, setSearchTotal] = useState(0);
   const [searchLoading, setSearchLoading] = useState(false);
+  const [searchFocus, setSearchFocus] = useState<SearchFocus | null>(null);
   const [preview, setPreview] = useState<PreviewState>({ kind: "idle" });
   const [markdown, setMarkdown] = useState<MarkdownState>({ kind: "idle" });
   const [markdownMode, setMarkdownMode] = useState<"preview" | "raw">("preview");
@@ -88,6 +126,10 @@ function App() {
     return null;
   }, [items, selectedId, selectedItem]);
   const previewObjectUrl = useRef<string | null>(null);
+  const activeSearchFocus = useMemo(() => {
+    if (!searchFocus || searchFocus.hit.library_item_id !== selectedId) return null;
+    return searchFocus;
+  }, [searchFocus, selectedId]);
 
   const clearPreviewObjectUrl = useCallback(() => {
     if (previewObjectUrl.current) {
@@ -148,6 +190,15 @@ function App() {
     [apiOptions, items]
   );
 
+  const selectSearchHit = useCallback(
+    (hit: SearchHit) => {
+      const trimmed = query.trim();
+      setSearchFocus({ query: trimmed, hit });
+      selectLibraryItem(hit.library_item_id).catch(() => undefined);
+    },
+    [query, selectLibraryItem]
+  );
+
   useEffect(() => {
     refreshLibrary().catch(() => undefined);
   }, [query, statusFilter, typeFilter]);
@@ -158,6 +209,7 @@ function App() {
       setSearchHits([]);
       setSearchTotal(0);
       setSearchLoading(false);
+      setSearchFocus(null);
       return;
     }
     let cancelled = false;
@@ -439,7 +491,7 @@ function App() {
           loading={searchLoading}
           mode={searchMode}
           onModeChange={setSearchMode}
-          onSelect={(hit) => selectLibraryItem(hit.library_item_id).catch(() => undefined)}
+          onSelect={selectSearchHit}
           onReindex={handleReindexSearch}
         />
 
@@ -448,7 +500,10 @@ function App() {
             <button
               key={item.library_item_id}
               className={`file-row ${selectedId === item.library_item_id ? "selected" : ""}`}
-              onClick={() => selectLibraryItem(item.library_item_id).catch(() => undefined)}
+              onClick={() => {
+                setSearchFocus(null);
+                selectLibraryItem(item.library_item_id).catch(() => undefined);
+              }}
             >
               <FileGlyph type={item.detected_type} />
               <span className="file-main">
@@ -513,7 +568,10 @@ function App() {
             <div className="pane-header">
               <div>
                 <h3>Markdown</h3>
-                <p>{markdown.kind === "ready" ? `${markdown.markdown.length.toLocaleString()} chars` : ""}</p>
+                <p>
+                  {markdown.kind === "ready" ? `${markdown.markdown.length.toLocaleString()} chars` : ""}
+                  {activeSearchFocus ? ` · highlighting "${activeSearchFocus.query}"` : ""}
+                </p>
               </div>
               <div className="segmented">
                 <button
@@ -544,7 +602,7 @@ function App() {
               </div>
             </div>
             <div className="pane-body">
-              <MarkdownView state={markdown} mode={markdownMode} />
+              <MarkdownView state={markdown} mode={markdownMode} focus={activeSearchFocus} />
             </div>
           </section>
         </div>
@@ -684,17 +742,183 @@ function PreviewView({ state, item }: { state: PreviewState; item: LibraryItem |
   return <EmptyState title="No preview" />;
 }
 
-function MarkdownView({ state, mode }: { state: MarkdownState; mode: "preview" | "raw" }) {
+function MarkdownView({
+  state,
+  mode,
+  focus,
+}: {
+  state: MarkdownState;
+  mode: "preview" | "raw";
+  focus: SearchFocus | null;
+}) {
+  const highlightSpec = useMemo(() => buildHighlightSpec(focus), [focus]);
+  const containerRef = useRef<HTMLElement | null>(null);
+  const markdownComponents = useMemo<Components>(
+    () => ({
+      p: ({ children, ...props }) => <p {...props}>{highlightChildren(children, highlightSpec)}</p>,
+      li: ({ children, ...props }) => <li {...props}>{highlightChildren(children, highlightSpec)}</li>,
+      h1: ({ children, ...props }) => <h1 {...props}>{highlightChildren(children, highlightSpec)}</h1>,
+      h2: ({ children, ...props }) => <h2 {...props}>{highlightChildren(children, highlightSpec)}</h2>,
+      h3: ({ children, ...props }) => <h3 {...props}>{highlightChildren(children, highlightSpec)}</h3>,
+      h4: ({ children, ...props }) => <h4 {...props}>{highlightChildren(children, highlightSpec)}</h4>,
+      h5: ({ children, ...props }) => <h5 {...props}>{highlightChildren(children, highlightSpec)}</h5>,
+      h6: ({ children, ...props }) => <h6 {...props}>{highlightChildren(children, highlightSpec)}</h6>,
+      td: ({ children, ...props }) => <td {...props}>{highlightChildren(children, highlightSpec)}</td>,
+      th: ({ children, ...props }) => <th {...props}>{highlightChildren(children, highlightSpec)}</th>,
+      blockquote: ({ children, ...props }) => (
+        <blockquote {...props}>{highlightChildren(children, highlightSpec)}</blockquote>
+      ),
+      code: ({ children, ...props }) => <code {...props}>{highlightChildren(children, highlightSpec)}</code>,
+      strong: ({ children, ...props }) => <strong {...props}>{highlightChildren(children, highlightSpec)}</strong>,
+      em: ({ children, ...props }) => <em {...props}>{highlightChildren(children, highlightSpec)}</em>,
+      a: ({ children, ...props }) => <a {...props}>{highlightChildren(children, highlightSpec)}</a>,
+    }),
+    [highlightSpec]
+  );
+
+  useEffect(() => {
+    if (state.kind !== "ready" || !highlightSpec.exactTerms.length && !highlightSpec.contextTerms.length) return;
+    const timer = window.setTimeout(() => {
+      const mark = containerRef.current?.querySelector(".markdown-search-mark, .markdown-semantic-mark");
+      mark?.scrollIntoView({ block: "center", behavior: "smooth" });
+    }, 80);
+    return () => window.clearTimeout(timer);
+  }, [highlightSpec, state.kind, mode]);
+
   if (state.kind === "idle") return <EmptyState title="Select a file" />;
   if (state.kind === "loading") return <BusyState label="Loading Markdown" />;
   if (state.kind === "pending") return <EmptyState title={state.message} active />;
   if (state.kind === "error") return <ErrorState message={state.message} />;
-  if (mode === "raw") return <pre className="raw-markdown">{state.markdown}</pre>;
+  if (mode === "raw") {
+    return (
+      <pre className="raw-markdown" ref={(node) => { containerRef.current = node; }}>
+        {highlightChildren(state.markdown, highlightSpec)}
+      </pre>
+    );
+  }
   return (
-    <article className="markdown-render">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{state.markdown}</ReactMarkdown>
+    <article className="markdown-render" ref={(node) => { containerRef.current = node; }}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]} components={markdownComponents}>
+        {state.markdown}
+      </ReactMarkdown>
     </article>
   );
+}
+
+function buildHighlightSpec(focus: SearchFocus | null): HighlightSpec {
+  if (!focus) return { exactTerms: [], contextTerms: [], key: "" };
+  const markedTerms = extractMarkedTerms(focus.hit.snippet);
+  const exactTerms = uniqueTerms([focus.query, ...markedTerms], { minLength: 2, limit: 8 });
+  const contextTerms =
+    focus.hit.keyword_score > 0
+      ? []
+      : uniqueTerms(extractContextTerms(focus.hit.snippet), { minLength: 5, limit: 12 });
+  return {
+    exactTerms,
+    contextTerms: contextTerms.filter((term) => !exactTerms.some((exact) => exact.toLowerCase() === term.toLowerCase())),
+    key: `${focus.hit.library_item_id}:${focus.hit.chunk_index ?? "document"}:${focus.query}:${focus.hit.snippet}`,
+  };
+}
+
+function highlightChildren(children: React.ReactNode, spec: HighlightSpec): React.ReactNode {
+  if (!spec.exactTerms.length && !spec.contextTerms.length) return children;
+  return React.Children.map(children, (child) => {
+    if (typeof child === "string") return highlightText(child, spec);
+    if (React.isValidElement<{ children?: React.ReactNode }>(child) && child.props.children) {
+      return React.cloneElement(child, {
+        children: highlightChildren(child.props.children, spec),
+      });
+    }
+    return child;
+  });
+}
+
+function highlightText(text: string, spec: HighlightSpec): React.ReactNode {
+  const terms = [
+    ...spec.exactTerms.map((term) => ({ term, kind: "exact" as const })),
+    ...spec.contextTerms.map((term) => ({ term, kind: "context" as const })),
+  ].sort((left, right) => right.term.length - left.term.length);
+  if (!terms.length) return text;
+
+  const pattern = terms.map(({ term }) => termToPattern(term)).join("|");
+  if (!pattern) return text;
+  const matcher = new RegExp(pattern, "gi");
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(text)) !== null) {
+    if (match.index > cursor) {
+      nodes.push(text.slice(cursor, match.index));
+    }
+    const value = match[0];
+    const exact = spec.exactTerms.some((term) => termMatches(term, value));
+    nodes.push(
+      <mark key={`${spec.key}:${match.index}:${value}`} className={exact ? "markdown-search-mark" : "markdown-semantic-mark"}>
+        {value}
+      </mark>
+    );
+    cursor = match.index + value.length;
+    if (matcher.lastIndex === match.index) matcher.lastIndex += 1;
+  }
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+  return nodes.length ? nodes : text;
+}
+
+function extractMarkedTerms(snippet: string): string[] {
+  const terms: string[] = [];
+  const matcher = /<mark>(.*?)<\/mark>/gis;
+  let match: RegExpExecArray | null;
+  while ((match = matcher.exec(snippet)) !== null) {
+    const value = stripMarkup(match[1]).trim();
+    if (value) terms.push(value);
+  }
+  return terms;
+}
+
+function extractContextTerms(snippet: string): string[] {
+  const text = stripMarkup(snippet).replace(/\.\.\./g, " ");
+  const words = text.match(/[A-Za-z][A-Za-z0-9-]{4,}/g) || [];
+  const phrase = words.slice(0, 8).join(" ");
+  return [phrase, ...words.filter((word) => !SEARCH_HIGHLIGHT_STOPWORDS.has(word.toLowerCase()))];
+}
+
+function stripMarkup(value: string): string {
+  return value.replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function uniqueTerms(terms: string[], options: { minLength: number; limit: number }): string[] {
+  const seen = new Set<string>();
+  const output: string[] = [];
+  for (const rawTerm of terms) {
+    const term = rawTerm.replace(/\s+/g, " ").trim();
+    if (term.length < options.minLength) continue;
+    const key = term.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    output.push(term);
+    if (output.length >= options.limit) break;
+  }
+  return output;
+}
+
+function termToPattern(term: string): string {
+  const parts = term.trim().split(/\s+/).filter(Boolean).map(escapeRegExp);
+  if (!parts.length) return "";
+  const source = parts.join("\\s+");
+  if (/^[A-Za-z0-9]+$/.test(term)) {
+    return `\\b${source}\\b`;
+  }
+  return source;
+}
+
+function termMatches(term: string, value: string): boolean {
+  return term.replace(/\s+/g, " ").trim().toLowerCase() === value.replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
 function StatusPill({ item }: { item: LibraryItem }) {

@@ -646,6 +646,25 @@ button {
   white-space: pre-wrap;
 }
 
+.raw-markdown mark,
+.markdown-render mark {
+  border-radius: 3px;
+  color: #111827;
+  padding: 0 2px;
+}
+
+.raw-markdown .markdown-search-mark,
+.markdown-render .markdown-search-mark {
+  background: #fde68a;
+  box-shadow: 0 0 0 1px rgba(217, 119, 6, 0.16);
+}
+
+.raw-markdown .markdown-semantic-mark,
+.markdown-render .markdown-semantic-mark {
+  background: #bfdbfe;
+  box-shadow: 0 0 0 1px rgba(37, 99, 235, 0.14);
+}
+
 .image-preview {
   display: block;
   width: 100%;

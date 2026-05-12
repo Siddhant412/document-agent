@@ -24,7 +24,14 @@ def plain_snippet(text: str, query: str, *, radius: int = 160) -> str:
     end = min(len(normalized_text), match.end() + radius)
     prefix = "..." if start > 0 else ""
     suffix = "..." if end < len(normalized_text) else ""
-    return f"{prefix}{normalized_text[start:end].strip()}{suffix}"
+    fragment = normalized_text[start:end].strip()
+    highlighted = re.sub(
+        re.escape(query),
+        lambda found: f"<mark>{found.group(0)}</mark>",
+        fragment,
+        flags=re.IGNORECASE,
+    )
+    return f"{prefix}{highlighted}{suffix}"
 
 
 def clean_headline(headline: str, fallback_text: str, query: str) -> str:

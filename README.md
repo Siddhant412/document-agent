@@ -152,7 +152,7 @@ http://localhost:8080/app
 
 The UI supports single and multi-file upload, background queue status, a file library list, original/converted previews, Markdown preview/raw views, Markdown download, delete, and reprocess from the retained original file.
 
-The library search box searches both filenames and converted document text. Search is hybrid by default: Postgres full-text keyword search plus pgvector semantic search over Markdown chunks. Search results are clickable; selecting a result opens the same library item preview and Markdown panes as selecting a file from the library list.
+The library search box searches both filenames and converted document text. Search is hybrid by default: Postgres full-text keyword search plus pgvector semantic search over Markdown chunks. Search results are clickable; selecting a result opens the same library item preview and Markdown panes as selecting a file from the library list. The Markdown pane highlights exact keyword matches in yellow and semantic-context matches in blue.
 
 If you already had completed documents before enabling search, build the index once:
 

@@ -162,7 +162,14 @@ def reciprocal_rank_fusion(
         semantic_scores[key] = max(semantic_scores.get(key, 0.0), hit.semantic_score or hit.score)
         scores[key] = scores.get(key, 0.0) + alpha / (rrf_k + rank)
 
-    ranked = sorted(scores, key=lambda key: scores[key], reverse=True)
+    ranked = sorted(
+        scores,
+        key=lambda key: (
+            keyword_scores.get(key, 0.0) > 0.0,
+            scores[key],
+        ),
+        reverse=True,
+    )
     return [
         SearchHit(
             library_item_id=merged[key].library_item_id,
